@@ -35,10 +35,34 @@
     ord.forEach((el, j) => { ps[el] = a.s + j * dur; pe[el] = a.s + (j + 1) * dur; });
     plan[a.id] = { s: ps, e: pe }; fact[a.id] = { s: new Float32Array(N), e: new Float32Array(N) };
   }
+  /* поставки комплектов ВЭУ: 8 комплектов каждые 18 дней; в сценарии задержка лопастей в пути */
+  const deliveries = []; { let got = 0, d = 250; while (got < N) { if (!(d >= 404 && d < 452)) { const q = Math.min(8, N - got); deliveries.push([d, q]); got += q; } d += 18; } }
+  const setDay = new Float32Array(N); { let j = 0; for (const [day, q] of deliveries) for (let k = 0; k < q; k++) setDay[ord[j++]] = day; }
+  const PARTS = [['tower', 'Секции башни'], ['nacelle', 'Гондола и ступица'], ['blades', 'Лопасти']];
+  // когда компоненты ВЭУ пришли на площадку: из отчёта, а без него — по сценарию поставок
+  function comp(i) { if (!REAL) return { tower: setDay[i], nacelle: setDay[i], blades: setDay[i], demo: true };
+    const r = REAL.wtg[i] || {}, done = r.erect && r.erect[1] != null ? r.erect[1] : null, g = k => r[k] != null ? r[k] : done; return { tower: g('tower'), nacelle: g('nacelle'), blades: g('blades'), demo: false }; }
+  /* краны: сколько главных кранов на площадке и сколько дней уходит на одну ВЭУ вместе с переездом; оба числа приняты* и меняются на экране */
+  const CR = { n: 3, days: 7 }, craneOf = new Int8Array(N).fill(-1);
+  try { const v = JSON.parse(localStorage.getItem('jambyl-cranes')); if (v && v.n >= 1 && v.n <= 8 && v.days >= 3 && v.days <= 20) { CR.n = Math.round(v.n); CR.days = Math.round(v.days); } } catch (e) {}
+  // монтаж: ВЭУ встают в очередь по дате готовности (подъезд, площадка, бетон, комплект), каждую берёт кран, который освободится первым
+  function buildErect(stops) {
+    const a = A.erect, fs = fact.erect.s, fe = fact.erect.e, t0 = REAL ? Math.max(a.s + 3, REAL.day) : a.s + 3, free = new Array(CR.n).fill(t0), todo = []; let k = 0; craneOf.fill(-1);
+    ord.forEach(el => { const r = REAL && REAL.wtg[el] && REAL.wtg[el].erect;
+      if (r && r[1] != null) { fe[el] = r[1]; fs[el] = r[0] != null && r[0] < r[1] ? r[0] : r[1] - CR.days; return; }
+      if (r && r[0] != null) { fs[el] = r[0]; fe[el] = Math.max(REAL.day + 1, skip(r[0], r[0] + CR.days, stops)); const c = k++ % CR.n; craneOf[el] = c; free[c] = Math.max(free[c], fe[el]); return; }
+      const c = comp(el), pd = [c.tower, c.nacelle, c.blades], parts = pd.every(v => v != null) ? Math.max(...pd) : 0;
+      todo.push([el, Math.max(fact.found.e[el] + a.lag, fact.pad.e[el], fact.road.e[el], parts)]); });
+    todo.sort((x, y) => x[1] - y[1]);
+    for (const [el, ready] of todo) { let c = 0; for (let j = 1; j < CR.n; j++) if (free[j] < free[c]) c = j;
+      let st = Math.max(ready, free[c]); if (stops) for (const [x, y] of stops) if (st >= x && st < y) st = y;
+      fs[el] = st; fe[el] = skip(st, st + CR.days, stops); free[c] = fe[el]; craneOf[el] = c; }
+  }
   /* факт: без данных с площадки — демонстрационный сценарий; с данными — внесённые даты, а остаток досчитывается плановым темпом от даты отчёта */
   function buildFact() {
     for (const a of ACT) { if (!a.per) continue;
       const dur = (a.e - a.s) / N, fs = fact[a.id].s, fe = fact[a.id].e, stops = REAL ? (a.id === 'found' ? WINTER : null) : a.stop; let t = REAL ? Math.max(a.s + 3, REAL.day) : a.s + 3;
+      if (a.id === 'erect') { buildErect(stops); continue; }
       ord.forEach(el => { const r = REAL && REAL.wtg[el] && REAL.wtg[el][a.id];
         if (r && r[1] != null) { fe[el] = r[1]; fs[el] = r[0] != null && r[0] < r[1] ? r[0] : r[1] - Math.max(1, dur / a.f); return; }
         if (r && r[0] != null) { fs[el] = r[0]; fe[el] = Math.max(REAL.day + 1, skip(r[0], r[0] + dur / a.f, stops)); return; }
@@ -70,19 +94,14 @@
   }
   const STEPS = ['road', 'pad', 'found', 'erect', 'mv', 'com'];
   const steps = i => STEPS.map(id => ({ id, name: A[id].name, plan: plan[id].e[i], fact: fact[id].e[i], start: fact[id].s[i] }));
-  /* поставки комплектов ВЭУ: 8 комплектов каждые 18 дней; в сценарии задержка лопастей в пути */
-  const deliveries = []; { let got = 0, d = 250; while (got < N) { if (!(d >= 404 && d < 452)) { const q = Math.min(8, N - got); deliveries.push([d, q]); got += q; } d += 18; } }
-  const setDay = new Float32Array(N); { let j = 0; for (const [day, q] of deliveries) for (let k = 0; k < q; k++) setDay[ord[j++]] = day; }
-  const PARTS = [['tower', 'Секции башни'], ['nacelle', 'Гондола и ступица'], ['blades', 'Лопасти']];
-  // когда компоненты ВЭУ пришли на площадку: из отчёта, а без него — по сценарию поставок
-  function comp(i) { if (!REAL) return { tower: setDay[i], nacelle: setDay[i], blades: setDay[i], demo: true };
-    const r = REAL.wtg[i] || {}, done = r.erect && r.erect[1] != null ? r.erect[1] : null, g = k => r[k] != null ? r[k] : done; return { tower: g('tower'), nacelle: g('nacelle'), blades: g('blades'), demo: false }; }
   const delivered = d => { if (!REAL) return deliveries.reduce((s, [day, q]) => s + (day <= d ? q : 0), 0);
     let n = 0; for (let i = 0; i < N; i++) { const c = comp(i); if (c.tower != null && c.nacelle != null && c.blades != null && Math.max(c.tower, c.nacelle, c.blades) <= d) n++; } return n; };
   const partsOnSite = d => PARTS.map(([k, name]) => { let n = 0; for (let i = 0; i < N; i++) { const v = comp(i)[k]; if (v != null && v <= d) n++; } return { k, name, n }; });
-  const R = rng(140), QCT = { pad: ['Основание площадки недоуплотнено'], found: ['Анкерная корзина отклонена от оси', 'Трещины в бетоне после распалубки', 'Нет протокола прочности бетона'], erect: ['Не подтверждён момент затяжки фланца', 'Повреждена кромка лопасти при разгрузке'], mv: ['Не испытана оболочка кабеля', 'Муфта без маркировки'] }, qc = [];
+  const QCT = { pad: ['Основание площадки недоуплотнено'], found: ['Анкерная корзина отклонена от оси', 'Трещины в бетоне после распалубки', 'Нет протокола прочности бетона'], erect: ['Не подтверждён момент затяжки фланца', 'Повреждена кромка лопасти при разгрузке'], mv: ['Не испытана оболочка кабеля', 'Муфта без маркировки'] }, qc = [];
+  function genQC() { const R = rng(140); qc.length = 0;
   for (let k = 0; k < 70; k++) { const id = ['pad', 'found', 'found', 'erect', 'erect', 'mv'][Math.floor(R() * 6)], i = Math.floor(R() * N), l = QCT[id], text = l[Math.floor(R() * l.length)], found = fact[id].e[i] + R() * 6; qc.push({ n: k + 1, i, id, text, found, closed: found + 4 + R() * 30 + (R() < .12 ? 90 : 0), sev: /Трещины|кромка|корзина/.test(text) ? 'bad' : 'warn' }); }
-  qc.sort((a, b) => a.found - b.found);
+  qc.sort((a, b) => a.found - b.found); }
+  genQC();
   const STOPWHY = { 395: 'Ветер сильнее 10 м/с: кран не работает', 430: 'Лопасти задержались в пути: нет комплектов', 470: 'Ветер сильнее 10 м/с: кран не работает', 556: 'Метель и ветер: кран не работает' };
   function metrics(d) {
     const D = Math.min(MAXD, Math.round(d)), pv = curvePlan[D], ev = curveFact[D]; let es = 0; while (es < MAXD && curvePlan[es + 1] <= ev) es++;
@@ -121,7 +140,7 @@
     const steps = CHECK.map(([id, k, name]) => { const day = at(fact, id, k), plan = at(plan0, id, k); return { id, name, day, plan, done: d >= day }; });
     const next = steps.find(s => !s.done), cur = next ? steps[steps.indexOf(next) - 1] : steps[steps.length - 1], doing = next && d >= fact[next.id].s[i], pf = prog(fact), pp = prog(plan0), c = comp(i), n = String(i + 1).padStart(3, '0');
     const es = fact.erect.s[i], ee = fact.erect.e[i], crane = d >= ee ? 'снят, монтаж закончен' : d >= es ? 'на площадке, идёт монтаж' : es - d <= 14 ? 'мобилизуется, монтаж с ' : 'по графику с ';
-    return { steps, stage: doing ? 'В работе: ' + next.name[0].toLowerCase() + next.name.slice(1) : cur ? cur.name : 'Работы не начаты', next, pct: pf, planPct: pp, spi: pp > 0.005 ? pf / pp : 1, crane, craneDay: d < es ? es : null,
+    return { steps, stage: doing ? 'В работе: ' + next.name[0].toLowerCase() + next.name.slice(1) : cur ? cur.name : 'Работы не начаты', next, pct: pf, planPct: pp, spi: pp > 0.005 ? pf / pp : 1, crane, craneDay: d < es ? es : null, craneNo: craneOf[i] + 1,
       parts: [['tower', 'Секции башни', 'T-' + n + ' (5 шт)'], ['nacelle', 'Гондола и ступица', 'N-' + n], ['blades', 'Комплект лопастей', 'B-' + n]].map(([k, name, sn]) => ({ k, name, sn, day: c[k], here: c[k] != null && c[k] <= d, mounted: k === 'tower' ? d >= at(fact, 'erect', .6) : k === 'nacelle' ? d >= at(fact, 'erect', .78) : d >= ee })), demo: c.demo };
   }
   const plan0 = plan;
@@ -143,7 +162,7 @@
       { k: 'pad', name: 'Монтажная площадка готова', ok: d >= fact.pad.e[i], day: fact.pad.e[i] },
       { k: 'cure', name: 'Бетон фундамента набрал прочность', ok: d >= cured, day: cured, note: d >= pour && d < cured ? 'идёт ' + Math.min(CURE, Math.floor(d - pour) + 1) + '-е сутки из ' + CURE : d < pour ? 'фундамент ещё не забетонирован' : null },
       { k: 'parts', name: 'Башня, гондола и лопасти на площадке', ok: partsDay != null && d >= partsDay, day: partsDay, note: partsDay == null ? 'нет данных о поставке' : null },
-      { k: 'crane', name: 'Кран и бригада на площадке', ok: d >= fact.erect.s[i], day: fact.erect.s[i] },
+      { k: 'crane', name: 'Кран и бригада на площадке', ok: d >= fact.erect.s[i], day: fact.erect.s[i], note: craneOf[i] >= 0 ? 'кран № ' + (craneOf[i] + 1) : null },
     ], com = [
       { k: 'mech', name: 'ВЭУ смонтирована', ok: d >= fact.erect.e[i], day: fact.erect.e[i] },
       { k: 'cable', name: 'Кабель 35 кВ дошёл от подстанции', ok: d >= up, day: up, note: up > fact.mv.e[i] + 0.5 && d < up ? 'свой участок готов, ждём соседние ВЭУ фидера' : null },
@@ -183,7 +202,17 @@
   const DISC = { pad: 'Земляные работы', found: 'Фундаменты', erect: 'Монтаж ВЭУ', mv: 'Кабель 35 кВ' };
   function tasks(d) { if (REAL) return []; return qc.filter(q => q.found <= d).map(q => { const life = q.closed - q.found, t = d - q.found;
     return { n: q.n, i: q.i, text: q.text, disc: DISC[q.id], sev: q.sev, found: q.found, closed: q.closed, age: Math.round(Math.min(t, life)), status: d >= q.closed ? 'closed' : t < 2 ? 'new' : t < life * 0.65 ? 'work' : 'review' }; }); }
+  // загрузка кранов на дату: что монтирует каждый, что возьмёт следующим и сколько кранов нужно для планового темпа
+  function craneLoad(d) {
+    const list = []; for (let c = 0; c < CR.n; c++) { const mine = []; for (let i = 0; i < N; i++) if (craneOf[i] === c) mine.push(i); mine.sort((a, b) => fact.erect.s[a] - fact.erect.s[b]);
+      const cur = mine.find(i => d >= fact.erect.s[i] && d < fact.erect.e[i]), next = mine.find(i => fact.erect.s[i] > d);
+      list.push({ no: c + 1, cur: cur == null ? null : cur, until: cur == null ? null : fact.erect.e[cur], next: next == null ? null : next, nextDay: next == null ? null : fact.erect.s[next], done: mine.filter(i => d >= fact.erect.e[i]).length, total: mine.length }); }
+    let end = 0; for (let i = 0; i < N; i++) end = Math.max(end, fact.erect.e[i]);
+    return { n: CR.n, days: CR.days, list, need: CR.days * N / (A.erect.e - A.erect.s), end, planEnd: A.erect.e };
+  }
+  function setCranes(n, days) { CR.n = Math.max(1, Math.min(8, Math.round(n))); CR.days = Math.max(3, Math.min(20, Math.round(days)));
+    try { localStorage.setItem('jambyl-cranes', JSON.stringify(CR)); } catch (e) {} buildFact(); if (!REAL) genQC(); recalc(); return CR; }
   function loadFact(real) { REAL = real && real.day != null ? { day: real.day, wtg: real.wtg || {}, area: real.area || {}, file: real.file, skipped: real.skipped } : null; buildFact(); recalc(); return REAL; }
-  window.EPCW = { ACT, A, DAY0, PD, PAC, MAXD, dateOf, MILESTONES, WINTER, plan, fact, curvePlan, curveFact, mwPlan, mwFact, get factEnd() { return factEnd; }, get real() { return REAL; }, loadFact, comp, PARTS, ord, detail, layers, gates, GATE_STATE, bottlenecks, inventory, wbs, tasks, CURE, upCable, wtgState, steps, metrics, qc, delivered, BOQ, ECON, finance,
+  window.EPCW = { ACT, A, DAY0, PD, PAC, MAXD, dateOf, MILESTONES, WINTER, plan, fact, curvePlan, curveFact, mwPlan, mwFact, get factEnd() { return factEnd; }, get real() { return REAL; }, loadFact, comp, PARTS, ord, detail, layers, gates, GATE_STATE, bottlenecks, craneLoad, setCranes, craneOf, inventory, wbs, tasks, CURE, upCable, wtgState, steps, metrics, qc, delivered, BOQ, ECON, finance,
     STAGE: ['Не начато', 'Подъезд готов', 'Площадка готова', 'Фундамент готов', 'Идёт монтаж', 'Смонтирована', 'Подключена к сети 35 кВ', 'В работе'] };
 })();

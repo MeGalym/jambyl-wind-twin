@@ -129,6 +129,16 @@
   const HOLD = [['ready', 'Готовы к монтажу, ждут кран'], ['parts', 'Ждут комплект ВЭУ'], ['cure', 'Бетон набирает прочность'], ['waitGrid', 'Смонтированы, ждут сеть 220 кВ'], ['waitCable', 'Смонтированы, ждут кабель'], ['test', 'На пусконаладке']];
   function holdRows(compact) { const rows = HOLD.filter(([k]) => C.BN[k].length || !compact); return rows.length ? `<div class="hold">${rows.map(([k, t]) => `<button data-hold="${k}"><span>${t}</span><b>${C.BN[k].length}</b><i><u style="width:${C.BN[k].length / N * 100}%;background:${SETS.ready.cls[READY.indexOf(k)][0]}"></u></i></button>`).join('')}</div>` : '<p class="hint">Сейчас ни одна ВЭУ не ждёт: работы идут по очереди.</p>'; }
   const gateList = (list, hold) => `<div class="check gates">${list.map(g => `<div class="${g.ok ? 'done' : g === hold ? 'cur' : ''}"><i></i><span>${g.name}</span><em>${g.ok ? fd(g.day) : g.day == null ? '—' : 'ждём ' + fd(g.day)}</em>${g.note && !g.ok ? `<small>${g.note}</small>` : ''}</div>`).join('')}</div>`;
+  function craneBox() { const L = E.craneLoad(S.D), M = C.M, mw = M.ms[M.ms.length - 1].fact, slip = mw < 0 ? null : mw - E.PD, st = M.stopped;
+    return `<div class="box cranes"><h2>Краны <span>для планового темпа нужно ${fmt(L.need, 1)}</span></h2><div class="pad">
+      <div class="set"><div class="stepper"><label>Кранов на площадке</label><div><button data-cr="n-" aria-label="Меньше кранов"${L.n <= 1 ? ' disabled' : ''}>−</button><b>${L.n}</b><button data-cr="n+" aria-label="Больше кранов"${L.n >= 8 ? ' disabled' : ''}>+</button></div></div>
+        <div class="stepper"><label>Дней на одну ВЭУ</label><div><button data-cr="d-" aria-label="Меньше дней"${L.days <= 3 ? ' disabled' : ''}>−</button><b>${L.days}</b><button data-cr="d+" aria-label="Больше дней"${L.days >= 20 ? ' disabled' : ''}>+</button></div></div></div>
+      <dl class="facts"><dt>Монтаж закончится</dt><dd>${fd(L.end)}${L.end > L.planEnd + 3 ? ', на ' + fmt(L.end - L.planEnd) + ' дн. позже плана' : ''}</dd><dt>1000 МВт в сети</dt><dd class="${slip > 3 ? 'bad' : ''}">${mw < 0 ? 'позже ' + fd(E.MAXD) : fd(mw) + (slip > 3 ? ', на ' + fmt(slip) + ' дн. позже RFP' : ', в срок RFP')}</dd></dl>
+      <div class="crlist">${L.list.map(c => { const w = c.cur != null ? c.cur : c.next, g = c.cur == null && c.next != null ? C.gt[c.next] : null;
+        return `<button ${w != null ? 'data-w="' + w + '"' : 'disabled'}><b>${c.no}</b><span>${c.cur != null ? name(c.cur) + '<small>' + (st ? 'стоит: ' + M.stopWhy.toLowerCase() : 'монтаж до ' + fd(c.until)) + '</small>' : c.next != null ? 'Свободен<small>' + name(c.next) + ' с ' + fd(c.nextDay) + (g && g.holdErect && g.holdErect.k !== 'crane' ? ': ' + ({ cure: 'бетон набирает прочность', parts: 'ждёт комплект', road: 'нет подъезда', pad: 'нет площадки' })[g.holdErect.k] : '') + '</small>' : 'Работа закончена<small>смонтировал ' + c.done + ' ВЭУ</small>'}</span><em>${c.done} из ${c.total}</em></button>`; }).join('')}</div>
+      <p class="note">Дни на одну ВЭУ — вместе с переездом крана. Оба числа приняты*: поменяйте на свои, прогноз пересчитается.</p></div></div>`; }
+  document.addEventListener('click', e => { const b = e.target.closest('[data-cr]'); if (!b) return; const L = E.craneLoad(S.D), k = b.dataset.cr;
+    E.setCranes(L.n + (k === 'n+' ? 1 : k === 'n-' ? -1 : 0), L.days + (k === 'd+' ? 1 : k === 'd-' ? -1 : 0)); update(); const el = document.querySelector('[data-cr="' + k + '"]'); if (el) el.focus(); });
   function renderRight() { const M = C.M, i = S.sel; let h;
     if (i == null) { const lag = Math.round(S.D - M.es), q = [...C.queue.entries()].slice(0, 5);
       h = `<div class="box"><h2>Площадка <span>${fd(S.D)}</span></h2><div class="pad"><div class="kpis">
@@ -137,6 +147,7 @@
           <div class="kpi"><label>Смонтировано</label><b>${C.L.erect.done}<small>из ${N}</small></b><span>в монтаже ${C.L.erect.now.length}</span></div>
           <div class="kpi"><label>В сети</label><b>${fmt(M.mw)}<small>МВт</small></b><span>по вехам RFP ${fmt(M.mwPlan)}</span></div></div></div></div>
         <div class="box"><h2>Что держит монтаж и пуск</h2><div class="pad">${holdRows(true)}<p class="note">Нажмите на строку — карта покажет только эти ВЭУ.</p></div></div>
+        ${craneBox()}
         <div class="box"><h2>Очередь на монтаж</h2><div class="pad">${q.length ? `<div class="queue">${q.map(([w, k]) => { const g = C.gt[w]; return `<button data-w="${w}"><b>${k}</b><span>${name(w)}<small>${g.state === 'ready' ? 'всё готово, ждёт кран' : E.GATE_STATE[g.state].toLowerCase()}</small></span><em>${fd(g.startDay)}</em></button>`; }).join('')}</div>` : '<p class="hint">Все ВЭУ уже в монтаже или смонтированы.</p>'}</div></div>`; }
     else { const b = C.st[i], d = C.det[i], g = C.gt[i], obs = C.open.get(i) || [], pct = Math.round(d.pct * 100), cls = SETS.stage.cls[SETS.stage.of(i)], fmem = W.feeders[W.feeder[i]].slice().sort((a, c) => W.fpos[c] - W.fpos[a]), place = fmem.indexOf(i) + 1, jr = JOURNAL.filter(x => x.i === i).slice(-4).reverse(), found = E.fact.found, pour = S.D >= found.e[i]; let body;
       if (S.rtab === 'steps') body = `<div class="check">${d.steps.map(x => { const late = Math.round(S.D - x.plan); return `<div class="${x.done ? 'done' : x === d.next ? 'cur' : ''}"><i></i><span>${x.name}</span><em>${x.done ? fd(x.day) : 'план ' + fd(x.plan)}</em>${!x.done && late > 0 ? `<small>просрочено на ${fmt(late)} дн.</small>` : ''}</div>`; }).join('')}</div>
@@ -176,7 +187,7 @@
   $('#d-range').max = E.MAXD; $('#d-range').addEventListener('input', e => { S.D = +e.target.value; update(); });
   $('#d-prev').onclick = () => { S.D = clampD(S.D - 7); update(); }; $('#d-next').onclick = () => { S.D = clampD(S.D + 7); update(); }; $('#d-today').onclick = () => { S.D = E.real ? clampD(E.real.day) : today; update(); };
   addEventListener('keydown', e => { if (e.key === 'Escape' && S.view === 'map') select(null, false); });
-  const UI = window.EPCUI = { S, C, E, W, SITE, N, $, fmt, fd, fm, name, esc, SETS, READY, HOLD, T_STATUS, holdRows, select, update, go, toast, addPunch, movePunch, views: {}, today };
+  const UI = window.EPCUI = { S, C, E, W, SITE, N, $, fmt, fd, fm, name, esc, SETS, READY, HOLD, T_STATUS, holdRows, craneBox, select, update, go, toast, addPunch, movePunch, views: {}, today };
   const q = new URLSearchParams(location.hash.slice(1)); if (q.get('d')) S.D = clampD(+q.get('d'));
   UI.start = () => { calc(); fitAll(); update(); if (q.get('v') && UI.views[q.get('v')]) go(q.get('v')); if (q.get('wtg')) { const i = SITE.wtg.findIndex(w => w[0] === q.get('wtg')); if (i >= 0) select(i, true); } };
 })();
