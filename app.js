@@ -90,7 +90,7 @@ function applySun(min) {
 function refreshEnv() { envScene.add(sky); const rt = pmrem.fromScene(envScene, 0, 1, 200000); scene.add(sky); if (envRT) envRT.dispose(); envRT = rt; scene.environment = rt.texture; scene.environmentIntensity = .25 + .75 * THREE.MathUtils.smoothstep(live.el ?? 40, -4, 10); }
 
 /* рельеф: сетка высот, заполняется из открытых тайлов высот; подложка — спутниковый снимок */
-const TX0 = -11000, TX1 = 11500, TZ0 = -13500, TZ1 = 13500, STEP = 75, NX = Math.round((TX1 - TX0) / STEP) + 1, NZ = Math.round((TZ1 - TZ0) / STEP) + 1;
+const TX0 = -11000, TX1 = 11500, TZ0 = -13500, TZ1 = 13500, STEP = innerWidth <= 760 ? 75 : 40, DEMZ = innerWidth <= 760 ? 12 : 13, NX = Math.round((TX1 - TX0) / STEP) + 1, NZ = Math.round((TZ1 - TZ0) / STEP) + 1;
 const hAbs = new Float32Array(NX * NZ); let E0 = 1000;
 for (let j = 0; j < NZ; j++) for (let i = 0; i < NX; i++) { const x = TX0 + i * STEP, z = TZ0 + j * STEP; hAbs[j * NX + i] = 1100 + 55 * Math.sin(x / 2600 + 1) * Math.cos(z / 3100) + 30 * Math.sin(x / 900 + z / 1300) - z * 0.012; }
 function ground(x, z) { const fx = Math.max(0, Math.min(NX - 1.001, (x - TX0) / STEP)), fz = Math.max(0, Math.min(NZ - 1.001, (z - TZ0) / STEP)), i = fx | 0, j = fz | 0, a = fx - i, b = fz - j, k = j * NX + i;
@@ -122,9 +122,9 @@ async function mosaic(zm, url, onTile) {
 async function loadTerrain() {
   const status = $('#status'); status.textContent = 'Загружаю рельеф и спутниковый снимок…';
   let demOk = false, imgOk = false;
-  try { const d = await mosaic(12, (z, x, y) => `https://s3.amazonaws.com/elevation-tiles-prod/terrarium/${z}/${x}/${y}.png`);
+  try { const d = await mosaic(DEMZ, (z, x, y) => `https://s3.amazonaws.com/elevation-tiles-prod/terrarium/${z}/${x}/${y}.png`);
     if (d.ok && !d.bad) { const px = d.g.getImageData(0, 0, d.cv.width, d.cv.height).data, wd = d.cv.width, ht = d.cv.height;
-      const smp = (x, z) => { const fx = Math.max(0, Math.min(wd - 1.001, (tX(lonOf(x), 12) - d.x0) * 256)), fy = Math.max(0, Math.min(ht - 1.001, (tY(latOf(z), 12) - d.y0) * 256)), i = fx | 0, j = fy | 0, a = fx - i, b = fy - j;
+      const smp = (x, z) => { const fx = Math.max(0, Math.min(wd - 1.001, (tX(lonOf(x), DEMZ) - d.x0) * 256)), fy = Math.max(0, Math.min(ht - 1.001, (tY(latOf(z), DEMZ) - d.y0) * 256)), i = fx | 0, j = fy | 0, a = fx - i, b = fy - j;
         const h = k => px[k] * 256 + px[k + 1] + px[k + 2] / 256 - 32768, k = (j * wd + i) * 4; return h(k) * (1 - a) * (1 - b) + h(k + 4) * a * (1 - b) + h(k + wd * 4) * (1 - a) * b + h(k + wd * 4 + 4) * a * b; };
       for (let j = 0; j < NZ; j++) for (let i = 0; i < NX; i++) hAbs[j * NX + i] = smp(TX0 + i * STEP, TZ0 + j * STEP);
       demOk = true; applyHeights(); layout(); buildCurve(); refresh(); } } catch (e) { console.warn('DEM', e); }
