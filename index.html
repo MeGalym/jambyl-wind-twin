@@ -7,7 +7,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Geologica:wght@300;400;500;600&family=Golos+Text:wght@400;500;600&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="style.css?v=7">
+<link rel="stylesheet" href="style.css?v=8">
 </head>
 <body>
 <svg width="0" height="0" style="position:absolute"><defs>
@@ -28,9 +28,10 @@
     </nav>
     <div class="search">
       <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="7" cy="7" r="4.6"/><path d="M10.6 10.6 14 14"/></svg>
-      <input id="q" type="search" placeholder="Найти: WTG045, фидер 7" autocomplete="off" aria-label="Поиск оборудования">
+      <input id="q" type="search" placeholder="Найти WTG" autocomplete="off" aria-label="Поиск оборудования">
       <div id="suggest" class="glass"></div>
     </div>
+    <button class="glass pbtn" id="pbtn" aria-pressed="true"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M2.5 13V8M6.2 13V3M9.9 13V6.5M13.5 13V9.5"/></svg><span>Показатели</span></button>
     <div class="clock glass" id="clockbox"></div>
   </header>
 
@@ -67,12 +68,12 @@
 </div>
 <div id="status"></div>
 <div id="boot">Строю ветропарк: 140 ветроустановок…</div>
-<script src="site-data.js?v=7"></script>
-<script src="wind.js?v=7"></script>
-<script src="epcw.js?v=7"></script>
+<script src="site-data.js?v=8"></script>
+<script src="wind.js?v=8"></script>
+<script src="epcw.js?v=8"></script>
 <script type="importmap">
 {"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js","three/addons/":"https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"}}
 </script>
-<script type="module" src="app.js?v=7"></script>
+<script type="module" src="app.js?v=8"></script>
 </body>
 </html>

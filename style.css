@@ -254,3 +254,18 @@ table.boq{width:100%;border-collapse:collapse;font-size:12px}
 #wtgview{position:fixed;inset:0;z-index:40;background:#0a0b0d;display:none}#wtgview.open{display:block}
 #wtgview iframe{position:absolute;inset:0;width:100%;height:100%;border:0}
 #wtgview [data-close]{position:absolute;left:50%;top:14px;transform:translateX(-50%);padding:9px 16px;border-radius:999px;font-size:12.5px;font-weight:600;color:#fff;z-index:2}
+
+/* показатели по кнопке */
+.pbtn{display:flex;align-items:center;gap:8px;height:46px;padding:0 16px;border-radius:999px;font-size:13px;font-weight:500;white-space:nowrap;margin-left:auto;flex:none;color:var(--ink,#fff)}
+.pbtn[aria-pressed="true"]{background:var(--amber);color:#1b1407;font-weight:600}
+.pbtn+.clock{margin-left:0}
+.insp-actions{margin-bottom:4px}
+body.lean #ui{grid-template-columns:minmax(0,1fr);grid-template-areas:"top" "left" "bot"}
+body.lean #right{display:none;position:fixed;right:16px;top:74px;bottom:16px;width:min(348px,calc(100% - 32px));z-index:6}
+body.lean.panel #right{display:flex}
+body.lean #bot{grid-template-columns:minmax(0,1fr)}
+body.lean #side{display:none}
+body.lean #sld{right:16px}
+@media (max-width:900px){.pbtn span{display:none}.pbtn{padding:0 14px}}
+@media (max-width:760px){.pbtn{display:none}}
+@media (max-width:1100px){.search{flex-basis:110px}.search input{padding-right:8px}.tabs button{padding:0 10px}}
