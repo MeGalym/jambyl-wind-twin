@@ -110,7 +110,27 @@
     if (npv(lo) > 0 && npv(hi) < 0) { for (let i = 0; i < 60; i++) { const m = (lo + hi) / 2; npv(m) > 0 ? lo = m : hi = m; } irr = (lo + hi) / 2; }
     return { lcoe: dC / dE * 100, npv: npv(r), irr, payback, rev, perKw: capex / (N * W.T.rated) };
   }
+  /* подробный ход работ по одной ВЭУ: девять шагов от подъезда до пуска, каждый — доля своей работы */
+  const CHECK = [['road', 1, 'Подъезд', 6], ['pad', 1, 'Монтажная площадка', 8], ['found', .45, 'Котлован и арматура фундамента', 10], ['found', 1, 'Бетон залит и набрал прочность', 14],
+    ['erect', .4, 'Башня: нижние и средние секции', 12], ['erect', .6, 'Башня: верхняя секция', 8], ['erect', .78, 'Гондола и ступица', 10], ['erect', 1, 'Лопасти установлены', 10], ['mv', 1, 'Кабель 35 кВ подключён', 10], ['com', 1, 'Пусконаладка и пуск', 12]];
+  const CW = CHECK.reduce((s, c) => s + c[3], 0);
+  function detail(i, d) {
+    const at = (src, id, k) => src[id].s[i] + (src[id].e[i] - src[id].s[i]) * k, prog = src => { let p = 0, prev = {}; for (const [id, k, , w] of CHECK) { const k0 = prev[id] || 0, a = at(src, id, k0), b = at(src, id, k); p += w * (d >= b ? 1 : d <= a ? 0 : (d - a) / (b - a)); prev[id] = k; } return p / CW; };
+    const steps = CHECK.map(([id, k, name]) => { const day = at(fact, id, k), plan = at(plan0, id, k); return { id, name, day, plan, done: d >= day }; });
+    const next = steps.find(s => !s.done), cur = next ? steps[steps.indexOf(next) - 1] : steps[steps.length - 1], doing = next && d >= fact[next.id].s[i], pf = prog(fact), pp = prog(plan0), c = comp(i), n = String(i + 1).padStart(3, '0');
+    const es = fact.erect.s[i], ee = fact.erect.e[i], crane = d >= ee ? 'снят, монтаж закончен' : d >= es ? 'на площадке, идёт монтаж' : es - d <= 14 ? 'мобилизуется, монтаж с ' : 'по графику с ';
+    return { steps, stage: doing ? 'В работе: ' + next.name[0].toLowerCase() + next.name.slice(1) : cur ? cur.name : 'Работы не начаты', next, pct: pf, planPct: pp, spi: pp > 0.005 ? pf / pp : 1, crane, craneDay: d < es ? es : null,
+      parts: [['tower', 'Секции башни', 'T-' + n + ' (5 шт)'], ['nacelle', 'Гондола и ступица', 'N-' + n], ['blades', 'Комплект лопастей', 'B-' + n]].map(([k, name, sn]) => ({ k, name, sn, day: c[k], here: c[k] != null && c[k] <= d, mounted: k === 'tower' ? d >= at(fact, 'erect', .6) : k === 'nacelle' ? d >= at(fact, 'erect', .78) : d >= ee })), demo: c.demo };
+  }
+  const plan0 = plan;
+  /* слои проекта: сколько сделано по каждому виду работ и что сейчас в работе */
+  function layers(d) {
+    const cnt = id => { let done = 0; const now = []; for (let i = 0; i < N; i++) { if (d >= fact[id].e[i]) done++; else if (d >= fact[id].s[i]) now.push(i); } return { done, now }; };
+    const fd = {}; for (let i = 0; i < N; i++) { const f = W.feeder[i]; fd[f] = fd[f] || [0, 0]; fd[f][1]++; if (d >= fact.mv.e[i]) fd[f][0]++; }
+    const feeders = Object.entries(fd).map(([f, [a, b]]) => ({ f: +f, p: a / b }));
+    return { road: qty('road', d, true), roadQty: A.road.qty, pad: cnt('pad'), found: cnt('found'), erect: cnt('erect'), mv: cnt('mv'), com: cnt('com'), feeders, ss: lin(A.ss, d, true), ohlJ: lin(A.ohlJ, d, true), ohlK: lin(A.ohlK, d, true), bess: lin(A.bess, d, true) };
+  }
   function loadFact(real) { REAL = real && real.day != null ? { day: real.day, wtg: real.wtg || {}, area: real.area || {}, file: real.file, skipped: real.skipped } : null; buildFact(); recalc(); return REAL; }
-  window.EPCW = { ACT, A, DAY0, PD, PAC, MAXD, dateOf, MILESTONES, WINTER, plan, fact, curvePlan, curveFact, mwPlan, mwFact, get factEnd() { return factEnd; }, get real() { return REAL; }, loadFact, comp, PARTS, ord, wtgState, steps, metrics, qc, delivered, BOQ, ECON, finance,
+  window.EPCW = { ACT, A, DAY0, PD, PAC, MAXD, dateOf, MILESTONES, WINTER, plan, fact, curvePlan, curveFact, mwPlan, mwFact, get factEnd() { return factEnd; }, get real() { return REAL; }, loadFact, comp, PARTS, ord, detail, layers, wtgState, steps, metrics, qc, delivered, BOQ, ECON, finance,
     STAGE: ['Не начато', 'Подъезд готов', 'Площадка готова', 'Фундамент готов', 'Идёт монтаж', 'Смонтирована', 'Подключена к сети 35 кВ', 'В работе'] };
 })();
