@@ -21,21 +21,31 @@
   const A = Object.fromEntries(ACT.map(a => [a.id, a])), WSUM = ACT.reduce((s, a) => s + a.w, 0);
   const ord = Array.from({ length: N }, (_, i) => i).sort((a, b) => W.route[a] - W.route[b]);   // фронт идёт от подстанции к дальним ВЭУ
   const skip = (t0, t1, stops) => { if (stops) for (const [a, b] of stops) if (t1 > a && t0 < b) t1 += b - Math.max(a, t0); return t1; };
-  const lin = (a, d, f) => Math.max(0, Math.min(1, (d - a.s - (f ? 6 : 0)) / ((a.e - a.s) / (f ? a.f : 1))));
-  const areaEnd = id => A[id].s + 6 + (A[id].e - A[id].s) / A[id].f;
+  let REAL = null;      // данные с площадки: { day, wtg: { i: { road: [начало, конец], ..., tower, nacelle, blades } }, area: { ss: доля } }
+  const lin = (a, d, f) => { const p0 = f && REAL ? REAL.area[a.id] : null;
+    if (p0 != null) return d <= REAL.day ? p0 * Math.max(0, Math.min(1, (d - a.s) / Math.max(1, REAL.day - a.s))) : Math.min(1, p0 + (d - REAL.day) / (a.e - a.s));
+    return Math.max(0, Math.min(1, (d - a.s - (f ? 6 : 0)) / ((a.e - a.s) / (f ? a.f : 1)))); };
+  const areaEnd = id => REAL && REAL.area[id] != null ? REAL.day + (1 - REAL.area[id]) * (A[id].e - A[id].s) : A[id].s + 6 + (A[id].e - A[id].s) / A[id].f;
   const plan = {}, fact = {};
   for (const a of ACT) {
     if (!a.per) continue;
-    const dur = (a.e - a.s) / N, ps = new Float32Array(N), pe = new Float32Array(N), fs = new Float32Array(N), fe = new Float32Array(N); let t = a.s + 3;
-    ord.forEach((el, j) => {
-      ps[el] = a.s + j * dur; pe[el] = a.s + (j + 1) * dur;
-      let st = t; if (a.pre) st = Math.max(st, fact[a.pre].e[el] + a.lag);
-      if (a.id === 'com') st = Math.max(st, areaEnd('ss') + 4, areaEnd('ohlJ') + 2, fact.mv.e[el] + 3);
-      if (a.stop) for (const [x, y] of a.stop) if (st >= x && st < y) st = y;
-      const en = skip(st, st + dur / a.f, a.stop); fs[el] = st; fe[el] = en; t = a.id === 'com' ? Math.max(t, st + dur * 0.55) : en;
-    });
-    plan[a.id] = { s: ps, e: pe }; fact[a.id] = { s: fs, e: fe };
+    const dur = (a.e - a.s) / N, ps = new Float32Array(N), pe = new Float32Array(N);
+    ord.forEach((el, j) => { ps[el] = a.s + j * dur; pe[el] = a.s + (j + 1) * dur; });
+    plan[a.id] = { s: ps, e: pe }; fact[a.id] = { s: new Float32Array(N), e: new Float32Array(N) };
   }
+  /* факт: без данных с площадки — демонстрационный сценарий; с данными — внесённые даты, а остаток досчитывается плановым темпом от даты отчёта */
+  function buildFact() {
+    for (const a of ACT) { if (!a.per) continue;
+      const dur = (a.e - a.s) / N, fs = fact[a.id].s, fe = fact[a.id].e, stops = REAL ? (a.id === 'found' ? WINTER : null) : a.stop; let t = REAL ? Math.max(a.s + 3, REAL.day) : a.s + 3;
+      ord.forEach(el => { const r = REAL && REAL.wtg[el] && REAL.wtg[el][a.id];
+        if (r && r[1] != null) { fe[el] = r[1]; fs[el] = r[0] != null && r[0] < r[1] ? r[0] : r[1] - Math.max(1, dur / a.f); return; }
+        if (r && r[0] != null) { fs[el] = r[0]; fe[el] = Math.max(REAL.day + 1, skip(r[0], r[0] + dur / a.f, stops)); return; }
+        let st = t; if (a.pre) st = Math.max(st, fact[a.pre].e[el] + a.lag);
+        if (a.id === 'com') st = Math.max(st, areaEnd('ss') + 4, areaEnd('ohlJ') + 2, fact.mv.e[el] + 3);
+        if (stops) for (const [x, y] of stops) if (st >= x && st < y) st = y;
+        const en = skip(st, st + dur / a.f, stops); fs[el] = st; fe[el] = en; t = a.id === 'com' ? Math.max(t, st + dur * 0.55) : en; }); }
+  }
+  buildFact();
   function qty(id, d, isFact) {
     const a = A[id]; if (!a.per) return a.qty * lin(a, d, isFact);
     const src = isFact ? fact[id] : plan[id]; let q = 0;
@@ -45,8 +55,10 @@
   const pct = (d, f) => ACT.reduce((s, a) => s + a.w * qty(a.id, d, f) / a.qty, 0) / WSUM;
   const curvePlan = [], curveFact = [], mwPlan = [], mwFact = [];
   const online = (d, f) => { let n = 0; const src = (f ? fact : plan).com.e; for (let i = 0; i < N; i++) if (d >= src[i]) n++; return n * W.T.rated / 1000; };
-  for (let d = 0; d <= MAXD; d++) { curvePlan.push(pct(d, false)); curveFact.push(pct(d, true)); mwPlan.push(online(d, false)); mwFact.push(online(d, true)); }
-  const factEnd = curveFact.findIndex(v => v > 0.9995);
+  for (let d = 0; d <= MAXD; d++) { curvePlan.push(pct(d, false)); mwPlan.push(online(d, false)); }
+  let factEnd = 0;
+  function recalc() { curveFact.length = 0; mwFact.length = 0; for (let d = 0; d <= MAXD; d++) { curveFact.push(pct(d, true)); mwFact.push(online(d, true)); } factEnd = curveFact.findIndex(v => v > 0.9995); if (factEnd < 0) factEnd = MAXD; }
+  recalc();
   function wtgState(i, d) {
     const fr = id => { const s = fact[id].s[i], e = fact[id].e[i]; return d >= e ? 1 : d <= s ? 0 : (d - s) / (e - s); };
     const er = fr('erect'), st = { road: fr('road') >= 1, pad: fr('pad') >= 1, found: fr('found'), tower: Math.min(1, er / 0.6), nacelle: er > 0.7, blades: er >= 1 ? 3 : er > 0.9 ? 2 : er > 0.8 ? 1 : 0, erecting: er > 0 && er < 1, mv: fr('mv') >= 1, com: d >= fact.com.e[i] };
@@ -58,7 +70,14 @@
   const steps = i => STEPS.map(id => ({ id, name: A[id].name, plan: plan[id].e[i], fact: fact[id].e[i], start: fact[id].s[i] }));
   /* поставки комплектов ВЭУ: 8 комплектов каждые 18 дней; в сценарии задержка лопастей в пути */
   const deliveries = []; { let got = 0, d = 250; while (got < N) { if (!(d >= 404 && d < 452)) { const q = Math.min(8, N - got); deliveries.push([d, q]); got += q; } d += 18; } }
-  const delivered = d => deliveries.reduce((s, [day, q]) => s + (day <= d ? q : 0), 0);
+  const setDay = new Float32Array(N); { let j = 0; for (const [day, q] of deliveries) for (let k = 0; k < q; k++) setDay[ord[j++]] = day; }
+  const PARTS = [['tower', 'Секции башни'], ['nacelle', 'Гондола и ступица'], ['blades', 'Лопасти']];
+  // когда компоненты ВЭУ пришли на площадку: из отчёта, а без него — по сценарию поставок
+  function comp(i) { if (!REAL) return { tower: setDay[i], nacelle: setDay[i], blades: setDay[i], demo: true };
+    const r = REAL.wtg[i] || {}, done = r.erect && r.erect[1] != null ? r.erect[1] : null, g = k => r[k] != null ? r[k] : done; return { tower: g('tower'), nacelle: g('nacelle'), blades: g('blades'), demo: false }; }
+  const delivered = d => { if (!REAL) return deliveries.reduce((s, [day, q]) => s + (day <= d ? q : 0), 0);
+    let n = 0; for (let i = 0; i < N; i++) { const c = comp(i); if (c.tower != null && c.nacelle != null && c.blades != null && Math.max(c.tower, c.nacelle, c.blades) <= d) n++; } return n; };
+  const partsOnSite = d => PARTS.map(([k, name]) => { let n = 0; for (let i = 0; i < N; i++) { const v = comp(i)[k]; if (v != null && v <= d) n++; } return { k, name, n }; });
   const R = rng(140), QCT = { pad: ['Основание площадки недоуплотнено'], found: ['Анкерная корзина отклонена от оси', 'Трещины в бетоне после распалубки', 'Нет протокола прочности бетона'], erect: ['Не подтверждён момент затяжки фланца', 'Повреждена кромка лопасти при разгрузке'], mv: ['Не испытана оболочка кабеля', 'Муфта без маркировки'] }, qc = [];
   for (let k = 0; k < 70; k++) { const id = ['pad', 'found', 'found', 'erect', 'erect', 'mv'][Math.floor(R() * 6)], i = Math.floor(R() * N), l = QCT[id], text = l[Math.floor(R() * l.length)], found = fact[id].e[i] + R() * 6; qc.push({ n: k + 1, i, id, text, found, closed: found + 4 + R() * 30 + (R() < .12 ? 90 : 0), sev: /Трещины|кромка|корзина/.test(text) ? 'bad' : 'warn' }); }
   qc.sort((a, b) => a.found - b.found);
@@ -68,10 +87,10 @@
     if (es < MAXD && curvePlan[es + 1] > curvePlan[es]) es += (ev - curvePlan[es]) / (curvePlan[es + 1] - curvePlan[es]);
     const spiT = d > 10 ? es / d : 1, forecast = ev >= 0.9995 ? factEnd : PD / Math.max(spiT, .3);
     const acts = ACT.map(a => { const p = qty(a.id, d, false), f = qty(a.id, d, true), rate = (f - qty(a.id, d - 14, true)) / 14, left = a.qty - f; return { id: a.id, name: a.name, unit: a.unit, qty: a.qty, plan: p, fact: f, rate, need: left > 0.01 * a.qty ? left / Math.max(1, a.e - d) : 0, over: left > 0.01 * a.qty && d > a.e, done: left <= 0.005 * a.qty, started: f > 0 }; });
-    const erected = Math.round(qty('erect', d, true) + 0.49), del = delivered(d), stopped = A.erect.stop.find(([a, b]) => d >= a && d < b), winter = WINTER.find(([a, b]) => d >= a && d < b);
+    const erected = Math.round(qty('erect', d, true) + 0.49), del = delivered(d), stopped = REAL ? null : A.erect.stop.find(([a, b]) => d >= a && d < b), winter = WINTER.find(([a, b]) => d >= a && d < b);
     const mw = mwFact[D], ms = MILESTONES.map(m => ({ day: m[0], mw: m[1], tag: m[2], fact: mwFact.findIndex(v => v >= m[1] - 4) }));
     return { d, pv, ev, spi: pv > 0.002 ? ev / pv : 1, es, forecast, delay: forecast - PD, acts, del, erected, stock: Math.max(0, del - erected), stopped, stopWhy: stopped ? STOPWHY[stopped[0]] : null, winter,
-      mw, mwPlan: mwPlan[D], ms, open: qc.filter(q => q.found <= d && q.closed > d), cranes: (() => { const c = []; for (let i = 0; i < N; i++) if (d >= fact.erect.s[i] && d < fact.erect.e[i]) c.push(i); return c; })() };
+      mw, mwPlan: mwPlan[D], ms, open: REAL ? [] : qc.filter(q => q.found <= d && q.closed > d), real: REAL ? REAL.day : null, parts: partsOnSite(d), cranes: (() => { const c = []; for (let i = 0; i < N; i++) if (d >= fact.erect.s[i] && d < fact.erect.e[i]) c.push(i); return c; })() };
   }
 
   /* ведомость объёмов BOP (JAMBYL Project BOP BOQ.xlsx) */
@@ -91,6 +110,7 @@
     if (npv(lo) > 0 && npv(hi) < 0) { for (let i = 0; i < 60; i++) { const m = (lo + hi) / 2; npv(m) > 0 ? lo = m : hi = m; } irr = (lo + hi) / 2; }
     return { lcoe: dC / dE * 100, npv: npv(r), irr, payback, rev, perKw: capex / (N * W.T.rated) };
   }
-  window.EPCW = { ACT, A, DAY0, PD, PAC, MAXD, dateOf, MILESTONES, WINTER, plan, fact, curvePlan, curveFact, mwPlan, mwFact, factEnd, wtgState, steps, metrics, qc, delivered, BOQ, ECON, finance,
+  function loadFact(real) { REAL = real && real.day != null ? { day: real.day, wtg: real.wtg || {}, area: real.area || {}, file: real.file, skipped: real.skipped } : null; buildFact(); recalc(); return REAL; }
+  window.EPCW = { ACT, A, DAY0, PD, PAC, MAXD, dateOf, MILESTONES, WINTER, plan, fact, curvePlan, curveFact, mwPlan, mwFact, get factEnd() { return factEnd; }, get real() { return REAL; }, loadFact, comp, PARTS, ord, wtgState, steps, metrics, qc, delivered, BOQ, ECON, finance,
     STAGE: ['Не начато', 'Подъезд готов', 'Площадка готова', 'Фундамент готов', 'Идёт монтаж', 'Смонтирована', 'Подключена к сети 35 кВ', 'В работе'] };
 })();

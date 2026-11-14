@@ -405,6 +405,11 @@ function renderBuild() {
   $('#b-qcpill').lastElementChild.textContent = m.open.length;
   $('#b-qc').innerHTML = m.open.length ? m.open.slice(-6).reverse().map(q => `<div class="ev ${q.sev}" data-w="${q.i}"><i class="dot"></i><b>${wName(q.i)}</b><em>${fmt(D - q.found)} дн.</em><span>${q.text}</span></div>`).join('') : `<p class="empty">Открытых замечаний нет.</p>`;
   $('#side').innerHTML = `<div class="card-head"><h2>Комплекты ВЭУ</h2><span class="pill ${m.stopped ? 'warn' : 'off'}"><i></i><span>${m.erected >= N ? 'смонтированы' : m.stopped ? 'монтаж стоит' : 'на площадке ' + m.stock}</span></span></div>` + ring([['Смонтировано', m.erected, '#f5b544'], ['Ждут монтажа', m.stock, '#7fb6ff'], ['Не привезено', N - m.del, 'rgba(255,255,255,.18)']], m.erected + '', 'из ' + N);
+  const rd = E.real; $('#b-src').className = 'pill ' + (rd ? '' : 'off'); $('#b-src').lastElementChild.textContent = rd ? 'отчёт на ' + fdate(E.dateOf(rd.day)) : 'сценарий';
+  $('#b-srcnote').textContent = rd ? `Внесён факт по ${Object.keys(rd.wtg).length} ВЭУ из файла «${rd.file || 'отчёт'}». Всё, что после даты отчёта, — прогноз плановым темпом.${rd.skipped ? ' Не распознано строк: ' + rd.skipped + '.' : ''}` : 'Сейчас ход работ — демонстрационный сценарий. Загрузите таблицу с датами по каждой ВЭУ, и план будет сравниваться с вашим фактом.';
+  $('#b-demo').hidden = !rd; $('#b-cranes').textContent = m.cranes.length ? 'в монтаже ' + m.cranes.length + ' ВЭУ' : 'монтаж не идёт';
+  const cW = W.VMEAN / 0.8862, okShare = lim => (1 - Math.exp(-Math.pow(lim / cW, 2))) * 100;      // распределение Вейбулла, k = 2
+  $('#b-parts').innerHTML = `<dl class="kv">${m.parts.map(p => `<dt>${p.name} на площадке</dt><dd>${p.n} из ${N}</dd>`).join('')}<dt>Смонтировано ВЭУ</dt><dd>${m.erected} из ${N}</dd><dt>Подъём лопастей, ветер до 10 м/с*</dt><dd>${fmt(okShare(10))} % часов</dd><dt>Башня и гондола, до 12 м/с*</dt><dd>${fmt(okShare(12))} % часов</dd></dl><p class="note">Доля часов в году, когда кран может работать: по ветру Global Wind Atlas на оси 110 м. * Пределы по ветру приняты, в документах проекта их нет.</p>`;
   drawTimeline(); alertLabels();
 }
 
@@ -451,7 +456,10 @@ const RIGHT = {
     <section class="card glass"><div class="card-head"><h2>Подстанция и линии</h2><span class="pill off"><span>220/35 кВ</span></span></div><div class="rows" id="ss-rows"></div></section>
     <section class="card glass"><div class="card-head"><h2>Что теряет мощность</h2><span class="pill warn" id="ev-pill"><i></i><span>0</span></span></div><div class="rows" id="ev-rows"></div></section><p class="foot" id="src"></p>`,
   build: `<section class="card glass"><div class="card-head"><h2>Стройка на дату</h2><span class="pill off"><span>NTP июль 2026</span></span></div><div class="tiles" id="r-tiles"></div></section>
+    <section class="card glass"><div class="card-head"><h2>Данные с площадки</h2><span class="pill off" id="b-src"><i></i><span></span></span></div><p class="note" id="b-srcnote" style="margin:0"></p>
+      <div class="insp-actions"><button class="btn go" data-fact="load">Загрузить отчёт: CSV или Excel</button><button class="btn" data-fact="tpl">Скачать шаблон</button><button class="btn" data-fact="demo" id="b-demo">Вернуть сценарий</button></div><input type="file" id="b-file" accept=".csv,.txt,.xlsx" hidden></section>
     <section class="card glass"><div class="card-head"><h2>Требует решения</h2><span class="pill" id="b-pill"><i></i><span>0</span></span></div><div class="rows" id="b-alerts"></div></section>
+    <section class="card glass"><div class="card-head"><h2>Поставки и кран</h2><span class="pill off"><span id="b-cranes"></span></span></div><div id="b-parts"></div></section>
     <section class="card glass"><div class="card-head"><h2>Объёмы работ</h2><span class="pill off"><span>метка — план</span></span></div><div class="rows" id="b-acts"></div></section>
     <section class="card glass"><div class="card-head"><h2>Замечания ОТК</h2><span class="pill warn" id="b-qcpill"><i></i><span>0</span></span></div><div class="rows" id="b-qc"></div></section><p class="foot" id="src"></p>`,
   cost: `<section class="card glass"><div class="card-head"><h2>Экономика проекта</h2><span class="pill off"><span>1000 МВт</span></span></div><div class="tiles" id="r-tiles"></div></section>
@@ -462,7 +470,7 @@ const RIGHT = {
 const MODES = { ops: [['real', 'Вид'], ['power', 'Мощность'], ['wake', 'Ветер и следы'], ['elec', 'Сеть 35 кВ'], ['sld', 'Схема ПС'], ['zones', 'Ограничения']], build: [['stat', 'Ход работ'], ['pf', 'План и факт'], ['qc', 'Замечания']], cost: [] };
 const VIEWS = { ops: [[-6500, 4000, 13500], [-300, 0, 1500]], build: [[-9000, 9000, 15500], [0, 0, 500]], cost: [[-2000, 26000, 21000], [0, 0, 500]] };
 function setSrc() { const el = $('#src'); if (!el) return; const map = S.terrain && S.terrain.demOk ? 'Рельеф — открытые данные высот (Terrain Tiles), снимок — Esri World Imagery.' : 'Рельеф условный.';
-  el.textContent = (S.stage === 'ops' ? 'ВЭУ, дороги и траншеи — из KMZ проекта; подстанция — из ведомости HV-AIS; накопитель — из отчёта и чертежей СНЭ. Суточный ход ветра, кривая мощности и отказы — модель, это не данные SCADA. ' : S.stage === 'build' ? 'План привязан к вехам RFP, объёмы — из ведомости BOP. Фактический ход работ — демонстрационный сценарий. ' : 'Стоимость и тариф — из справки по проекту, подстанция — из оценённой ведомости. Роза ветров и средняя скорость — Global Wind Atlas; кривая мощности и форма распределения — допущения, ветрового отчёта проекта нет. ') + map; }
+  el.textContent = (S.stage === 'ops' ? 'ВЭУ, дороги и траншеи — из KMZ проекта; подстанция — из ведомости HV-AIS; накопитель — из отчёта и чертежей СНЭ. Суточный ход ветра, кривая мощности и отказы — модель, это не данные SCADA. ' : S.stage === 'build' ? 'План привязан к вехам RFP, объёмы — из ведомости BOP. ' + (E.real ? 'Факт — из загруженного отчёта, после его даты — прогноз. ' : 'Фактический ход работ — демонстрационный сценарий. ') : 'Стоимость и тариф — из справки по проекту, подстанция — из оценённой ведомости. Роза ветров и средняя скорость — Global Wind Atlas; кривая мощности и форма распределения — допущения, ветрового отчёта проекта нет. ') + map; }
 function setStage(s, fly = true) {
   S.stage = s; S.sel = null; S.playing = false; $('#play-ic').setAttribute('d', 'M4 2.5v11l9-5.5z');
   $$('#tabs button').forEach(b => b.setAttribute('aria-pressed', b.dataset.stage === s)); $('#right').innerHTML = RIGHT[s];
@@ -511,6 +519,7 @@ function renderInspector() {
     el.innerHTML = `<div class="card-head"><span class="pill ${b.late > 14 ? 'bad' : b.late > 0 ? 'warn' : ''}"><i></i><span>${b.late > 0 ? 'отстаёт на ' + fmt(b.late) + ' дн.' : 'по графику'}</span></span>${X_BTN}</div><h3 class="insp-title">${wName(i)}</h3><div class="insp-sub">${E.STAGE[b.stage]}. Фидер ${W.feeder[i] + 1}. Фундамент Ø26 м: 680 м³ бетона, 82 т арматуры</div>
       <div class="steps" style="border:0;padding:0;margin:0">${E.steps(i).map(x => { const done = D >= x.fact, now = !done && D >= x.start, late = Math.round((done ? x.fact : D) - x.plan);
         return `<div class="step ${done ? 'done' : now ? 'now' : ''}"><i></i><span>${x.name}</span><em>${done ? fdate(E.dateOf(x.fact)) : now ? 'в работе' : 'план ' + fdate(E.dateOf(x.plan))}</em>${late > 0 && (done || D > x.plan) ? `<small class="bad">${done ? 'сдано на' : 'просрочено на'} ${fmt(late)} дн. позже плана</small>` : done ? `<small>в срок</small>` : ''}</div>`; }).join('')}</div>
+      ${(c => `<dl class="kv" style="margin-top:10px">${E.PARTS.map(([k, name]) => `<dt>${name}</dt><dd class="${c[k] != null && c[k] <= D ? 'ok' : ''}">${c[k] == null ? 'нет данных' : c[k] <= D ? 'на площадке с ' + fdate(E.dateOf(c[k])) : 'ждём ' + fdate(E.dateOf(c[k]))}</dd>`).join('')}</dl>${c.demo ? '<p class="note">Поставки — по сценарию.</p>' : ''}`)(E.comp(i))}
       ${obs.length ? `<div class="rows" style="margin-top:12px">${obs.map(q => `<div class="ev ${q.sev}"><i class="dot"></i><b>Замечание ${q.n}</b><em>${fmt(D - q.found)} дн.</em><span>${q.text}</span></div>`).join('')}</div>` : ''}<div class="insp-actions"><button class="btn" data-act="fly">Показать в сцене</button></div>`; return; }
   const seg = `<div class="seg">${[['wtg', 'Ветроустановка'], ['feeder', 'Фидер 35 кВ']].map(l => `<button data-level="${l[0]}" aria-pressed="${s.level === l[0]}">${l[1]}</button>`).join('')}</div>`, key = selKey(s), ev = evCache.find(x => x.key === key), od = S.orders.find(o => o.key === key);
   const act = `<div class="insp-actions">${ev ? (od ? `<button class="btn go" data-adv="${key}">Наряд ${od.n}: ${WO[od.step].toLowerCase()} ✓</button>` : `<button class="btn go" data-new="${key}">Создать наряд бригаде</button>`) : ''}<button class="btn" data-act="fly">Показать в сцене</button>${s.level === 'wtg' ? '<button class="btn" data-act="tear">Разобрать в 3D</button>' : ''}</div>`;
@@ -632,3 +641,55 @@ window.__twin = { S, live: () => live, select, setStage, refresh, camera, contro
   btn.addEventListener('click', () => { if (narrow()) B.classList.toggle('panel'); else { wideLean = !wideLean; try { localStorage.setItem('lean', wideLean ? '1' : '0'); } catch (e) {} }
     apply(); dispatchEvent(new Event('resize')); });
   addEventListener('resize', apply); apply(); dispatchEvent(new Event('resize')); }
+
+/* ---------- данные с площадки: таблица CSV или Excel → факт по каждой ВЭУ ---------- */
+const FACT = (() => {
+  const dayOf = v => { if (v == null) return null; if (typeof v === 'number') return v > 30000 && v < 80000 ? Math.round((Date.UTC(1899, 11, 30) + v * 864e5 - E.DAY0) / 864e5) : null;
+    const t = String(v).trim(); let m = t.match(/^(\d{1,2})[./-](\d{1,2})[./-](\d{2,4})/), y, mo, d; if (m) { d = +m[1]; mo = +m[2]; y = +m[3]; if (y < 100) y += 2000; } else if ((m = t.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/))) { y = +m[1]; mo = +m[2]; d = +m[3]; } else { const n = +t.replace(',', '.'); return t && isFinite(n) && n > 30000 && n < 80000 ? dayOf(n) : null; }
+    if (mo < 1 || mo > 12 || d < 1 || d > 31) return null; return Math.round((Date.UTC(y, mo - 1, d) - E.DAY0) / 864e5); };
+  const pctOf = v => { if (v == null || v === '') return null; let n = typeof v === 'number' ? v : +String(v).replace('%', '').replace(',', '.').trim(); if (!isFinite(n)) return null; if (typeof v === 'number' && n <= 1) n *= 100; return Math.max(0, Math.min(100, n)) / 100; };
+  const idx = new Map(SITE.wtg.map((w, i) => [parseInt(String(w[0]).replace(/\D/g, ''), 10), i]));
+  const COLS = [[/башн/, 'tower'], [/гондол/, 'nacelle'], [/лопаст/, 'blades'], [/дорог|подъезд/, 'road'], [/площадк/, 'pad'], [/фундамент/, 'found'], [/монтаж/, 'erect'], [/кабел/, 'mv'], [/пуск|ввод/, 'com']];
+  const AREA = [[/^(пс|подстанц)/, 'ss'], [/жамбыл/, 'ohlJ'], [/кентау/, 'ohlK'], [/снэ|накопит|bess/, 'bess']];
+  // строки таблицы → объект для EPCW.loadFact
+  function fromRows(rows, file) {
+    const real = { day: null, wtg: {}, area: {}, file, skipped: 0 }; let head = null, maxDay = -1e9;
+    for (const row of rows) { const c0 = String(row[0] ?? '').trim(), low = c0.toLowerCase(); if (!c0) continue;
+      if (/дата отч/.test(low)) { real.day = dayOf(row[1]); continue; }
+      const ar = AREA.find(a => a[0].test(low)); if (ar && !head) { const p = pctOf(row[1]); if (p != null) real.area[ar[1]] = p; continue; }
+      if (!head && /^(вэу|wtg|№)/.test(low)) { head = row.map(h => { const t = String(h ?? '').toLowerCase(), c = COLS.find(x => x[0].test(t)); return c ? [c[1], /начал|старт/.test(t) ? 0 : 1] : null; }); continue; }
+      if (!head) continue; const num = parseInt(c0.replace(/\D/g, ''), 10), i = idx.get(num); if (i == null) { real.skipped++; continue; }
+      const r = {}; let any = false; head.forEach((h, k) => { if (!h || k === 0) return; const d = dayOf(row[k]); if (d == null) return; any = true; maxDay = Math.max(maxDay, d);
+        if (h[0] === 'tower' || h[0] === 'nacelle' || h[0] === 'blades') r[h[0]] = d; else { r[h[0]] = r[h[0]] || [null, null]; r[h[0]][h[1]] = d; } });
+      if (any) real.wtg[i] = r; }
+    if (!head) throw new Error('В таблице нет строки заголовков: первая ячейка должна быть «ВЭУ»');
+    if (!Object.keys(real.wtg).length) throw new Error('В таблице нет ни одной даты по ВЭУ');
+    if (real.day == null) real.day = maxDay; return real; }
+  function fromCsv(text) { text = text.replace(/^﻿/, ''); const first = text.split(/\r?\n/).find(l => /;|,|\t/.test(l)) || '', sep = (first.match(/;/g) || []).length >= (first.match(/,/g) || []).length ? ((first.match(/\t/g) || []).length > (first.match(/;/g) || []).length ? '\t' : ';') : ',';
+    return text.split(/\r?\n/).map(l => l.split(sep).map(c => c.replace(/^"|"$/g, '').trim())); }
+  // Excel: архив zip, внутри лист и общие строки в XML
+  async function fromXlsx(buf) { const dv = new DataView(buf), u8 = new Uint8Array(buf), td = new TextDecoder(); let eo = buf.byteLength - 22; while (eo >= 0 && dv.getUint32(eo, true) !== 0x06054b50) eo--; if (eo < 0) throw new Error('Файл не похож на Excel');
+    const cnt = dv.getUint16(eo + 10, true); let p = dv.getUint32(eo + 16, true); const files = {};
+    for (let k = 0; k < cnt; k++) { const method = dv.getUint16(p + 10, true), csz = dv.getUint32(p + 20, true), nl = dv.getUint16(p + 28, true), el = dv.getUint16(p + 30, true), cl = dv.getUint16(p + 32, true), lo = dv.getUint32(p + 42, true), name = td.decode(u8.subarray(p + 46, p + 46 + nl)); files[name] = { method, csz, lo }; p += 46 + nl + el + cl; }
+    const read = async name => { const f = files[name]; if (!f) return null; const nl = dv.getUint16(f.lo + 26, true), el = dv.getUint16(f.lo + 28, true), data = u8.subarray(f.lo + 30 + nl + el, f.lo + 30 + nl + el + f.csz);
+      if (f.method === 0) return td.decode(data); const ds = new DecompressionStream('deflate-raw'), w = ds.writable.getWriter(); w.write(data); w.close(); return await new Response(ds.readable).text(); };
+    const xml = t => new DOMParser().parseFromString(t, 'application/xml'), ssx = await read('xl/sharedStrings.xml'), strs = ssx ? [...xml(ssx).getElementsByTagName('si')].map(si => [...si.getElementsByTagName('t')].map(t => t.textContent).join('')) : [];
+    const sheet = Object.keys(files).filter(n => /^xl\/worksheets\/sheet\d+\.xml$/.test(n)).sort()[0]; if (!sheet) throw new Error('В файле Excel нет листа');
+    const rows = []; for (const r of xml(await read(sheet)).getElementsByTagName('row')) { const row = []; for (const c of r.getElementsByTagName('c')) { const ref = c.getAttribute('r') || '', col = [...ref.replace(/\d/g, '')].reduce((a, ch) => a * 26 + ch.charCodeAt(0) - 64, 0) - 1, t = c.getAttribute('t'), v = c.getElementsByTagName('v')[0], is = c.getElementsByTagName('is')[0];
+        row[col] = t === 's' ? strs[+v.textContent] : t === 'inlineStr' ? (is ? is.textContent : '') : v ? (t === 'str' ? v.textContent : +v.textContent) : ''; } rows.push(row); }
+    return rows; }
+  async function fromFile(file) { const buf = await file.arrayBuffer(); if (/\.xlsx$/i.test(file.name)) return fromRows(await fromXlsx(buf), file.name);
+    let text; try { text = new TextDecoder('utf-8', { fatal: true }).decode(buf); } catch (e) { text = new TextDecoder('windows-1251').decode(buf); } return fromRows(fromCsv(text), file.name); }
+  function template() { const h = ['ВЭУ', 'Дорога начало', 'Дорога конец', 'Площадка начало', 'Площадка конец', 'Фундамент начало', 'Фундамент конец', 'Башня на площадке', 'Гондола на площадке', 'Лопасти на площадке', 'Монтаж начало', 'Монтаж конец', 'Кабель начало', 'Кабель конец', 'Пуск'];
+    return '﻿' + [['Дата отчёта', 'дд.мм.гггг'], ['Подстанция, % готовности', ''], ['ВЛ до ПС Жамбыл, % готовности', ''], ['ВЛ до ПС Кентау, % готовности', ''], ['Накопитель, % готовности', ''], h, ...SITE.wtg.map(w => [w[0], ...h.slice(1).map(() => '')])].map(r => r.join(';')).join('\r\n'); }
+  function apply(real, save = true) { E.loadFact(real); if (save) try { real ? localStorage.setItem('jambyl-fact', JSON.stringify(real)) : localStorage.removeItem('jambyl-fact'); } catch (e) {}
+    if (real) S.bday = Math.max(0, Math.min(E.MAXD, real.day)); if (S.stage === 'build') setStage('build', false); }
+  try { const saved = JSON.parse(localStorage.getItem('jambyl-fact') || 'null'); if (saved && saved.day != null) { E.loadFact(saved); S.bday = Math.max(0, Math.min(E.MAXD, saved.day)); } } catch (e) {}
+  $('#right').addEventListener('click', e => { const b = e.target.closest('[data-fact]'); if (!b) return; const k = b.dataset.fact;
+    if (k === 'load') $('#b-file').click(); else if (k === 'demo') apply(null);
+    else { const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([template()], { type: 'text/csv;charset=utf-8' })); a.download = 'Жамбыл_факт_стройки_шаблон.csv'; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 2000); } });
+  $('#right').addEventListener('change', async e => { if (e.target.id !== 'b-file' || !e.target.files[0]) return; const st = $('#status');
+    try { apply(await fromFile(e.target.files[0])); st.textContent = ''; } catch (err) { st.textContent = 'Отчёт не загружен: ' + err.message; setTimeout(() => { if (st.textContent.startsWith('Отчёт')) st.textContent = ''; }, 8000); } });
+  return { fromRows, fromCsv, fromXlsx, fromFile, template, apply };
+})();
+window.__twin.FACT = FACT;
