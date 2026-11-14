@@ -180,7 +180,7 @@
   /* ---------- общее: выбор, дата, разделы ---------- */
   function select(i, zoom) { S.sel = i; if (i != null && zoom) { if (S.view !== 'map') go('map'); focus(i); } renderLeft(); renderRight(); redraw(); }
   function render() { if (S.view === 'map') { renderLeft(); renderRight(); redraw(); } else if (UI.views[S.view]) UI.views[S.view](); }
-  function update() { calc(); $('#d-range').value = S.D; $('#d-out').textContent = fd(S.D); $('#d-src').textContent = E.real ? 'отчёт на ' + fd(E.real.day) : 'сценарий'; $('#d-src').className = 'dsrc' + (E.real ? ' real' : '');
+  function update() { calc(); $('#d-range').value = S.D; $('#d-range').style.setProperty('--p', S.D / E.MAXD * 100 + '%'); $('#d-out').textContent = fd(S.D); $('#d-src').textContent = E.real ? 'отчёт на ' + fd(E.real.day) : 'сценарий'; $('#d-src').className = 'dsrc' + (E.real ? ' real' : '');
     const n = C.tasks.filter(t => t.status !== 'closed').length; $('#n-tasks').textContent = n || ''; $('#n-tasks').hidden = !n; render(); }
   function go(v) { S.view = v; for (const s of document.querySelectorAll('.view')) s.hidden = s.id !== 'v-' + v; for (const b of document.querySelectorAll('#nav button')) b.setAttribute('aria-pressed', b.dataset.v === v); if (v === 'map') fitAspect(); render(); }
   $('#nav').addEventListener('click', e => { const b = e.target.closest('button'); if (b) go(b.dataset.v); });
