@@ -114,10 +114,14 @@
 
   /* суточный ход ветра для режима эксплуатации */
   const DAYS = { calm: ['Слабый ветер', 4.6, 1.5], normal: ['Обычный день', 9.0, 2.3], strong: ['Сильный ветер', 13.5, 2.5], storm: ['Буря', 21.5, 4.2] };
+  let LIVE = null;      // почасовой прогноз погоды на сегодня: 25 значений скорости на оси, направления и температуры
+  function setLive(hours) { LIVE = hours && hours.length >= 24 ? hours : null; if (LIVE) DAYS.live = ['По прогнозу погоды', 9, 2.3]; else delete DAYS.live; }
   function windAt(min, day) {
-    const h = min / 60, [, base, amp] = DAYS[day];
+    if (day === 'live' && LIVE) { const f = Math.max(0, Math.min(LIVE.length - 1.001, min / 60)), k = f | 0, a = f - k, p = LIVE[k], q = LIVE[k + 1], dd = ((q.dir - p.dir + 540) % 360) - 180;
+      return { v: Math.max(0.3, p.v + (q.v - p.v) * a), dir: (p.dir + dd * a + 360) % 360, temp: p.temp + (q.temp - p.temp) * a }; }
+    const h = min / 60, [, base, amp] = DAYS[day === 'live' ? 'normal' : day];
     return { v: Math.max(0.5, base + amp * Math.sin(2 * Math.PI * (h - 9) / 24) + 0.45 * amp * Math.sin(2 * Math.PI * h / 5.3 + 1) + 0.2 * amp * Math.sin(2 * Math.PI * h / 1.7)),
       dir: (88 + 20 * Math.sin(2 * Math.PI * (h - 4) / 24) + 9 * Math.sin(2 * Math.PI * h / 6) + 360) % 360, temp: 11 + 7 * Math.cos(2 * Math.PI * (h - 15) / 24) };
   }
-  window.WIND = { T, EL, BESS, GWA, VMEAN, N, NF, X, Z, feeder, fpos, route, elev, feeders, feederTr, density, power, ratedSpeed, ct, rpm, pitch, wake, collect, ohl, section, aep, speedUp, ROSE, KW, DAYS, windAt, resetAep: () => { AEP = null; } };
+  window.WIND = { T, EL, BESS, GWA, VMEAN, N, NF, X, Z, feeder, fpos, route, elev, feeders, feederTr, density, power, ratedSpeed, ct, rpm, pitch, wake, collect, ohl, section, aep, speedUp, ROSE, KW, DAYS, windAt, setLive, resetAep: () => { AEP = null; } };
 })();

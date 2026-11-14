@@ -75,6 +75,17 @@ try { if (!PHONE) { composer = new EffectComposer(renderer, new THREE.WebGLRende
 const controls = new OrbitControls(camera, canvas);
 Object.assign(controls, { enableDamping: true, dampingFactor: .08, maxPolarAngle: 87 * RAD, minDistance: 60, maxDistance: 60000, zoomToCursor: true });
 const sky = new Sky(); sky.scale.setScalar(150000); Object.assign(sky.material.uniforms.turbidity, { value: 4 }); sky.material.uniforms.rayleigh.value = 1.2; sky.material.uniforms.mieCoefficient.value = .004; sky.material.uniforms.mieDirectionalG.value = .82; scene.add(sky);
+/* облака: тот же шум, что у теней на земле, поэтому тень лежит под своим облаком */
+const cloudMat = new THREE.ShaderMaterial({ transparent: true, depthWrite: false, side: THREE.DoubleSide, fog: false, uniforms: { uOff: { value: new THREE.Vector2() }, uCloud: { value: .3 }, uBright: { value: 1 }, uCam: { value: new THREE.Vector3() } },
+  vertexShader: 'varying vec3 vW; void main(){ vec4 w = modelMatrix * vec4(position, 1.0); vW = w.xyz; gl_Position = projectionMatrix * viewMatrix * w; }',
+  fragmentShader: `uniform vec2 uOff; uniform float uCloud, uBright; uniform vec3 uCam; varying vec3 vW;
+    float hsh(vec2 p){return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453);}
+    float nz(vec2 p){vec2 i=floor(p),f=fract(p);f=f*f*(3.0-2.0*f);return mix(mix(hsh(i),hsh(i+vec2(1,0)),f.x),mix(hsh(i+vec2(0,1)),hsh(i+vec2(1,1)),f.x),f.y);}
+    float fbm(vec2 p){float a=.5,s=0.;for(int i=0;i<5;i++){s+=a*nz(p);p*=2.03;a*=.5;}return s;}
+    void main(){ float n = fbm(vW.xz*0.00016+uOff), a = smoothstep(0.47,0.70,n), d = length(vW.xz-uCam.xz);
+      a *= (1.0 - smoothstep(50000.0, 150000.0, d)) * min(1.0, uCloud * 3.2); if (a < 0.01) discard;
+      float sh = 0.72 + 0.28 * smoothstep(0.5, 0.85, fbm(vW.xz*0.0005+uOff*3.0)); gl_FragColor = vec4(vec3(uBright * sh), a * 0.9); }` });
+const clouds = new THREE.Mesh(new THREE.PlaneGeometry(320000, 320000).rotateX(-Math.PI / 2), cloudMat); clouds.position.y = 3600; clouds.renderOrder = 2; clouds.frustumCulled = false; scene.add(clouds);
 const pmrem = new THREE.PMREMGenerator(renderer), envScene = new THREE.Scene(); let envRT = null, envDirty = true, envTimer = 0;
 const hemi = new THREE.HemisphereLight(0xcfe0ff, 0x8a7a5c, 1); scene.add(hemi);
 const sunL = new THREE.DirectionalLight(0xfff1dc, 3); sunL.castShadow = true; sunL.shadow.mapSize.set(PHONE ? 2048 : 4096, PHONE ? 2048 : 4096); sunL.shadow.bias = -0.0005; sunL.shadow.normalBias = 1.5; scene.add(sunL, sunL.target);
@@ -85,7 +96,7 @@ function applySun(min) {
   const k = THREE.MathUtils.smoothstep(el, -3, 9), low = THREE.MathUtils.smoothstep(el, 0, 22);
   sunL.intensity = 3.4 * k; sunL.color.setRGB(1, .72 + .26 * low, .5 + .44 * low); sunL.userData.dir = d.y > 0.03 ? d : new THREE.Vector3(d.x, 0.03, d.z).normalize();
   hemi.intensity = .1 + .95 * k; hemi.color.setRGB(.55 + .3 * k, .66 + .22 * k, 1); hemi.groundColor.setRGB(.5 * k + .05, .44 * k + .05, .33 * k + .06);
-  scene.fog.color.set(0x0b1019).lerp(new THREE.Color(0xd2a383), k).lerp(new THREE.Color(0xbcc7d4), low); renderer.toneMappingExposure = .27 + .17 * k; CLOUD.uCloud.value = .34 * k; envDirty = true; live.night = el < 0; live.el = el;
+  scene.fog.color.set(0x0b1019).lerp(new THREE.Color(0xd2a383), k).lerp(new THREE.Color(0xbcc7d4), low); renderer.toneMappingExposure = .27 + .17 * k; CLOUD.uCloud.value = .34 * k; cloudMat.uniforms.uBright.value = .25 + 2.3 * k; cloudMat.uniforms.uCloud.value = .34; envDirty = true; live.night = el < 0; live.el = el;
 }
 function refreshEnv() { envScene.add(sky); const rt = pmrem.fromScene(envScene, 0, 1, 200000); scene.add(sky); if (envRT) envRT.dispose(); envRT = rt; scene.environment = rt.texture; scene.environmentIntensity = .25 + .75 * THREE.MathUtils.smoothstep(live.el ?? 40, -4, 10); }
 
@@ -131,7 +142,7 @@ async function loadTerrain() {
   try { const zm = PHONE ? 13 : 14; let tex = null, last = 0; const uv = terGeo.attributes.uv;
     const d = await mosaic(zm, (z, x, y) => `https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/${z}/${y}/${x}`, () => { if (tex && performance.now() - last > 400) { tex.needsUpdate = true; last = performance.now(); } });
     if (d.ok > d.bad) { for (let j = 0; j < NZ; j++) for (let i = 0; i < NX; i++) uv.setXY(j * NX + i, (tX(lonOf(TX0 + i * STEP), zm) - d.x0) * 256 / d.cv.width, 1 - (tY(latOf(TZ0 + j * STEP), zm) - d.y0) * 256 / d.cv.height);
-      uv.needsUpdate = true; tex = new THREE.CanvasTexture(d.cv); tex.colorSpace = THREE.SRGBColorSpace; tex.anisotropy = 8; terMat.map = tex; terMat.color.set(0x7f858c); terMat.needsUpdate = true; imgOk = true; } } catch (e) { console.warn('imagery', e); }
+      uv.needsUpdate = true; tex = new THREE.CanvasTexture(d.cv); tex.colorSpace = THREE.SRGBColorSpace; tex.anisotropy = 8; terMat.map = tex; terMat.userData.img = true; terTone(); terMat.needsUpdate = true; imgOk = true; } } catch (e) { console.warn('imagery', e); }
   S.terrain = { demOk, imgOk }; status.textContent = demOk && imgOk ? '' : 'Картографический сервис недоступен: рельеф и подложка условные'; setSrc();
 }
 
@@ -283,7 +294,7 @@ function poseXray() { Object.keys(labels).filter(k => k[0] === 'x').forEach(k =>
   const on = S.stage === 'ops' && S.sel && S.sel.level === 'wtg'; xrI = on ? S.sel.i : -1; xr.visible = on; if (!on) return; const i = xrI, t = temps(i);
   xr.position.set(W.X[i], baseY[i] + T.hub + 1.5, W.Z[i]); xr.rotation.set(0, yaw, 0); xr.updateMatrixWorld(true);
   for (const k in xrParts) { const c = R_wake((t[k] - 25) / 85); xrParts[k].material.color.setRGB(c[0], c[1], c[2]); xrParts[k].material.emissive.setRGB(c[0] * .25, c[1] * .25, c[2] * .25); }
-  XR_TAG.forEach(([k, name, off], n) => { addLabel('x' + n, xr.localToWorld(new THREE.Vector3(...off)), `<b>${name}</b><span>${fmt(t[k])} °C</span>`, t[k] > 95 ? 'alert' : '', null, null); labels['x' + n].near = 900; }); }
+  XR_TAG.forEach(([k, name, off], n) => { addLabel('x' + n, xr.localToWorld(new THREE.Vector3(...off)), `<b>${name}</b><span>${fmt(t[k])} °C</span>`, t[k] > 95 ? 'alert' : '', null, null); labels['x' + n].near = 220; }); }
 
 /* ═════════ раскраска и слои ═════════ */
 const ramp = stops => t => { t = Math.max(0, Math.min(1, t)) * (stops.length - 1); const i = Math.min(stops.length - 2, Math.floor(t)), f = t - i, a = stops[i], b = stops[i + 1]; return [a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f, a[2] + (b[2] - a[2]) * f]; };
@@ -342,6 +353,7 @@ function createOrder(key) { const e = evCache.find(x => x.key === key); if (!e |
 function advanceOrder(key) { const o = S.orders.find(x => x.key === key); if (!o) return; if (++o.step >= 4) { o.fix(); S.orders = S.orders.filter(x => x !== o); S.fixed++; if (S.sel && selKey(S.sel) === key) S.sel = null; buildCurve(); } refresh(); }
 const selKey = s => s.level + ':' + (s.i ?? s.f ?? '');
 function renderOps() {
+  renderWx();
   const L = live, k = Math.min(curve.length - 1, Math.round(S.min / 10)), u = S.min / 1440, grid = curve[k], nRun = st.filter(x => x === 0 || x === 5).length;
   $('#clock').textContent = hhmm(S.min);
   $('#r-tiles').innerHTML = `
@@ -451,6 +463,7 @@ function renderSLD() {
 const RIGHT = {
   ops: `<section class="card glass"><div class="card-head"><h2>Станция сейчас</h2><span class="pill" id="st-pill"><i></i><span>В работе</span></span></div><div class="tiles" id="r-tiles"></div>
       <dl class="kv sep"><dt>Плотность воздуха</dt><dd id="f-a"></dd><dt>Потери в следах</dt><dd id="f-b"></dd><dt>Срезано ограничением сети</dt><dd id="f-c"></dd></dl></section>
+    <section class="card glass"><div class="card-head"><h2>Погода и прогноз</h2><span class="pill off"><span id="wx-pill"></span></span></div><div id="wx"></div></section>
     <section class="card glass"><div class="card-head"><h2>Сценарий</h2></div><div class="fin sc"><label>Погода<select id="sc-day">${Object.entries(W.DAYS).map(([k, d]) => `<option value="${k}">${d[0]}</option>`).join('')}</select></label><label>Сеть<select id="sc-net">${Object.entries(NETS).map(([k, d]) => `<option value="${k}">${d[0]}</option>`).join('')}</select></label><label>Накопитель<select id="sc-strat">${Object.entries(STRATS).map(([k, d]) => `<option value="${k}">${d}</option>`).join('')}</select></label></div></section>
     <section class="card glass"><div class="card-head"><h2>Частота и АРЧМ</h2><span class="pill off" id="agc-pill"><i></i><span></span></span></div><div id="agc"></div></section>
     <section class="card glass"><div class="card-head"><h2>Подстанция и линии</h2><span class="pill off"><span>220/35 кВ</span></span></div><div class="rows" id="ss-rows"></div></section>
@@ -478,7 +491,7 @@ function setStage(s, fly = true) {
   $('#clockbox').innerHTML = `<span class="num" id="clock"></span>`;
   if (s === 'ops') { $('#sc-day').value = S.day; $('#sc-net').value = S.net; $('#sc-strat').value = S.strat; }
   const tl = s !== 'cost'; for (const q of ['#tl-ctl', '#tl-chart', '#axis']) $(q).hidden = !tl; $('#bars').hidden = tl; const t = $('#t');
-  if (s === 'ops') { t.min = 0; t.max = 1435; t.step = 5; t.value = S.min; $('#now').textContent = 'Полдень'; $('#cap').innerHTML = '<span><i></i>ветропарк</span><span><i style="background:#f5b544"></i>в сеть с учётом накопителя и ограничений, до 1000 МВт</span>'; $('#axis').innerHTML = ['00:00', '06:00', '12:00', '18:00', '24:00'].map((x, i) => `<span style="left:${i * 25}%">${x}</span>`).join(''); }
+  if (s === 'ops') { t.min = 0; t.max = 1435; t.step = 5; t.value = S.min; $('#now').textContent = S.day === 'live' ? 'Сейчас' : 'Полдень'; $('#cap').innerHTML = '<span><i></i>ветропарк</span><span><i style="background:#f5b544"></i>в сеть с учётом накопителя и ограничений, до 1000 МВт</span>'; $('#axis').innerHTML = ['00:00', '06:00', '12:00', '18:00', '24:00'].map((x, i) => `<span style="left:${i * 25}%">${x}</span>`).join(''); }
   if (s === 'build') { t.min = 0; t.max = E.MAXD; t.step = 1; t.value = S.bday; $('#now').textContent = 'Финиш'; $('#cap').innerHTML = '<span><i></i>план</span><span><i style="background:#f5b544"></i>факт и прогноз</span>';
     const st = $('#tl-chart').clientWidth < 520 ? 200 : 100; let h = ''; for (let d = 0; d <= E.MAXD - (st > 100 ? 100 : 0); d += st) h += `<span style="left:${d / E.MAXD * 100}%">${E.dateOf(d).toLocaleDateString('ru-RU', { month: 'short', year: '2-digit', timeZone: 'UTC' }).replace(' г.', '').replace('.', '')}</span>`; $('#axis').innerHTML = h; }
   if (s === 'cost') $('#c-fin').innerHTML = FIELDS.map(([k, l]) => `<label>${l}<input type="number" step="any" data-k="${k}" value="${S.econ[k] ?? E.ECON[k]}"></label>`).join('');
@@ -525,7 +538,7 @@ function renderInspector() {
   const act = `<div class="insp-actions">${ev ? (od ? `<button class="btn go" data-adv="${key}">Наряд ${od.n}: ${WO[od.step].toLowerCase()} ✓</button>` : `<button class="btn go" data-new="${key}">Создать наряд бригаде</button>`) : ''}<button class="btn" data-act="fly">Показать в сцене</button>${s.level === 'wtg' ? '<button class="btn" data-act="tear">Разобрать в 3D</button>' : ''}</div>`;
   if (s.level === 'wtg') { const i = s.i, dv = pExp[i] > 1 ? (pw[i] / pExp[i] - 1) * 100 : NaN;
     el.innerHTML = `<div class="card-head"><span class="pill ${st[i] === 3 || st[i] === 6 ? 'bad' : st[i] ? 'warn' : ''}"><i></i><span>${ST_NAME[st[i]]}</span></span>${X_BTN}</div>${seg}<h3 class="insp-title">${wName(i)}</h3><div class="insp-sub">${fmt(T.rated / 1000, 2)} МВт, ротор ${T.D} м, ось ${T.hub} м. ${faultText[i] && st[i] ? faultText[i] : 'Фидер ' + (W.feeder[i] + 1) + ', трансформатор Т' + (W.feederTr[W.feeder[i]] + 1)}</div>
-      <div class="big"><b>${pwf(pw[i])}</b>${Number.isNaN(dv) ? '' : `<span class="${dv < -15 ? 'bad' : dv < -3 ? 'warn' : 'ok'}">${dv < -0.5 ? '↓ ' + fmt(-dv) + ' % к расчёту' : 'в норме'}</span>`}</div>` + act +
+      <div class="big"><b>${pwf(pw[i])}</b>${Number.isNaN(dv) ? '' : `<span class="${dv < -15 ? 'bad' : dv < -3 ? 'warn' : 'ok'}">${dv < -0.5 ? '↓ ' + fmt(-dv) + ' % к расчёту' : 'в норме'}</span>`}</div>` + act + wtgDash(i) +
       kv([['Ветер на роторе', fmt(v[i], 1) + ' м/с'], ['Потеря скорости в следе', fmt(def[i] * 100, 1) + ' %', def[i] > .12 ? 'bad' : ''], ['Обороты ротора', fmt(rpm[i] < 1 ? 0 : rpm[i], 1) + ' об/мин'], ['Угол лопастей', fmt(run[i] ? W.pitch(v[i], rho[i]) : 88) + '°'], ['Курс гондолы', `${compass(live.w.dir)}, ${fmt(live.w.dir)}°`], ['Высота площадки', fmt(W.elev[i]) + ' м'], ['Кабель до подстанции', fmt(W.route[i] / 1000, 1) + ' км'], ...(t => [['Редуктор, генератор', `${fmt(t.gear)} и ${fmt(t.gen)} °C`, t.gen > 95 ? 'bad' : ''], ['Подшипник, преобразователь', `${fmt(t.bear)} и ${fmt(t.conv)} °C`, t.bear > 95 || t.conv > 95 ? 'bad' : '']])(temps(i))]); return; }
   const f = s.f, m = W.feeders[f], p = m.reduce((a, i) => a + pw[i], 0), I = p / (Math.sqrt(3) * W.EL.kv * W.EL.cosphi);
   el.innerHTML = `<div class="card-head"><span class="pill ${tripped[f] ? 'bad' : ''}"><i></i><span>${tripped[f] ? 'Отключён' : 'В работе'}</span></span>${X_BTN}</div>${seg}<h3 class="insp-title">Фидер ${f + 1}</h3><div class="insp-sub">35 кВ, трансформатор Т${W.feederTr[f] + 1}, ${m.length} ВЭУ: ${m.map(wName).join(', ').replace(/WTG/g, '')}</div><div class="big"><b>${pwf(p)}</b><span>из ${fmt(m.length * T.rated / 1000, 1)} МВт</span></div>` +
@@ -549,7 +562,11 @@ function markSel() { const s = S.sel; Object.values(labels).forEach(l => l.el.cl
 function select(s, fly) { S.sel = s; paintDots(); poseXray(); renderInspector(); renderLegend(); markSel(); insets(); if (s && fly) flyToSel(); }
 let tween = null;
 function flyView(pos, tgt, ms = 1700) { const p = new THREE.Vector3(...pos), a = new THREE.Vector3(...tgt); a.y += ground(a.x, a.z); p.y += ground(a.x, a.z); if (reduceMotion) { camera.position.copy(p); controls.target.copy(a); return; } tween = { t0: performance.now(), ms, p0: camera.position.clone(), p1: p, a0: controls.target.clone(), a1: a }; }
-function flyToSel() { if (!S.sel) return; const { p, r } = selCenter(S.sel), dir = camera.position.clone().sub(controls.target).normalize(); if (dir.y < .3) { dir.y = .3; dir.normalize(); } const to = p.clone().add(dir.multiplyScalar(r * 2.2)); tween = reduceMotion ? null : { t0: performance.now(), ms: 1200, p0: camera.position.clone(), p1: to, a0: controls.target.clone(), a1: p }; if (reduceMotion) { camera.position.copy(to); controls.target.copy(p); } }
+function flyToSel() { if (!S.sel) return;
+  if (S.sel.level === 'wtg') { const i = S.sel.i, d = camera.position.clone().sub(controls.target); d.y = 0; if (d.lengthSq() < 1) d.set(1, 0, 1); d.normalize();
+    const a1 = new THREE.Vector3(W.X[i], baseY[i] + T.hub * .82, W.Z[i]), to = new THREE.Vector3(W.X[i], baseY[i] + T.hub * .82 + 14, W.Z[i]).addScaledVector(d, 330);
+    if (reduceMotion) { camera.position.copy(to); controls.target.copy(a1); } else tween = { t0: performance.now(), ms: 1400, p0: camera.position.clone(), p1: to, a0: controls.target.clone(), a1 }; return; }
+  const { p, r } = selCenter(S.sel), dir = camera.position.clone().sub(controls.target).normalize(); if (dir.y < .3) { dir.y = .3; dir.normalize(); } const to = p.clone().add(dir.multiplyScalar(r * 2.2)); tween = reduceMotion ? null : { t0: performance.now(), ms: 1200, p0: camera.position.clone(), p1: to, a0: controls.target.clone(), a1: p }; if (reduceMotion) { camera.position.copy(to); controls.target.copy(p); } }
 
 /* ═════════ подписи, легенда ═════════ */
 const labels = {}, labelsEl = $('#labels'), v3 = new THREE.Vector3();
@@ -586,7 +603,7 @@ function renderLegend() {
 /* ═════════ время, поиск, указатель ═════════ */
 $('#t').addEventListener('input', e => { if (S.stage === 'ops') S.min = +e.target.value; else S.bday = +e.target.value; refresh(); });
 $('#play').addEventListener('click', () => { S.playing = !S.playing; $('#play-ic').setAttribute('d', S.playing ? 'M4 2.5h3v11H4zM9 2.5h3v11H9z' : 'M4 2.5v11l9-5.5z'); if (S.playing && S.stage === 'build' && S.bday >= E.factEnd + 20) S.bday = 0; });
-$('#now').addEventListener('click', () => { if (S.stage === 'ops') S.min = 720; else S.bday = E.factEnd + 5; $('#t').value = S.stage === 'ops' ? S.min : S.bday; refresh(); });
+$('#now').addEventListener('click', () => { if (S.stage === 'ops') S.min = S.day === 'live' && WX && WX.nowMin != null ? WX.nowMin : 720; else S.bday = E.factEnd + 5; $('#t').value = S.stage === 'ops' ? S.min : S.bday; refresh(); });
 const q = $('#q'), sug = $('#suggest'); let sugList = [];
 function suggest(text) { const s = text.trim().toLowerCase(), out = [], num = (s.match(/\d+/) || [''])[0]; if (!s) return out;
   if (/пс|подст|ss|sub/.test(s)) out.push({ label: 'Подстанция 220/35 кВ', hint: 'точка учёта', sel: { level: 'ss' } });
@@ -626,6 +643,7 @@ function frame(now) {
   if (hoverQ) doHover(); if (envDirty && now - envTimer > 140) { envDirty = false; envTimer = now; refreshEnv(); }
   AGC.acc += dt; if (AGC.acc >= 1) { AGC.acc = 0; agcStep(); if (S.stage === 'ops') renderAgc(); }
   if (live.w) CLOUD.uOff.value.addScaledVector(new THREE.Vector2(fX, fZ), -live.w.v * dt * 0.00016 * 9);
+  cloudMat.uniforms.uOff.value.copy(CLOUD.uOff.value); cloudMat.uniforms.uCam.value.copy(camera.position);
   poseRotors(dt); flow(dt); composer ? composer.render() : renderer.render(scene, camera); placeLabels(); requestAnimationFrame(frame);
 }
 applyHeights(); layout(); buildCurve(); setStage('ops', false); resize(); refreshEnv();
@@ -693,3 +711,37 @@ const FACT = (() => {
   return { fromRows, fromCsv, fromXlsx, fromFile, template, apply };
 })();
 window.__twin.FACT = FACT;
+
+/* ---------- подложка: издалека приглушена, чтобы читались метки; вблизи — естественная ---------- */
+function terTone() { if (!terMat.userData.img) return; const d = camera.position.distanceTo(controls.target), k = Math.max(0, Math.min(1, (d - 700) / 5000)); terMat.color.setHex(0xd6d6d6).lerp(new THREE.Color(0x7f858c), k); }
+controls.addEventListener('change', terTone);
+
+/* ---------- погода: прогноз Open-Meteo по координатам площадки → ветер на оси, выработка на 7 дней ---------- */
+var WX = null;      // var: карточка погоды рисуется раньше, чем выполнится эта строка
+const WMO = c => c === 0 ? ['☀️', 'ясно'] : c <= 2 ? ['🌤️', 'малооблачно'] : c === 3 ? ['☁️', 'пасмурно'] : c <= 48 ? ['☁️', 'туман'] : c <= 67 ? ['🌧️', 'дождь'] : c <= 77 ? ['❄️', 'снег'] : c <= 82 ? ['🌦️', 'ливни'] : c <= 86 ? ['🌨️', 'снегопад'] : ['⛈️', 'гроза'];
+function parkMw(vHub, dir, temp) { const a = new Float32Array(N), r = new Float32Array(N), on = new Uint8Array(N), vv = new Float32Array(N), dd = new Float32Array(N);
+  for (let i = 0; i < N; i++) { a[i] = vHub * W.speedUp(W.elev[i], hMean); r[i] = W.density(W.elev[i] + T.hub, temp); on[i] = a[i] >= T.cutIn && a[i] < T.cutOut ? 1 : 0; }
+  W.wake(dir, a, r, on, vv, dd); let p = 0; for (let i = 0; i < N; i++) if (on[i]) p += W.power(vv[i], r[i]); return Math.min(1000, p / 1000 * 0.97); }      // 3 % — потери в кабелях и трансформаторах
+async function loadWeather() {
+  try { const M = SITE.meta, u = `https://api.open-meteo.com/v1/forecast?latitude=${M.lat0.toFixed(2)}&longitude=${M.lon0.toFixed(2)}&hourly=wind_speed_120m,wind_direction_120m,temperature_2m&daily=weather_code,temperature_2m_max,temperature_2m_min&wind_speed_unit=ms&timezone=auto&forecast_days=7`;
+    const j = await (await fetch(u)).json(), H = j.hourly, hours = H.time.map((t, k) => ({ t, v: H.wind_speed_120m[k], dir: H.wind_direction_120m[k], temp: H.temperature_2m[k] })).filter(h => h.v != null);
+    if (hours.length < 48) throw new Error('мало данных'); const mw = hours.map(h => parkMw(h.v, h.dir, h.temp));
+    const days = j.daily.time.map((d, k) => { const sl = mw.slice(k * 24, k * 24 + 24), vs = hours.slice(k * 24, k * 24 + 24).map(h => h.v); return { d, code: j.daily.weather_code[k], tmax: j.daily.temperature_2m_max[k], tmin: j.daily.temperature_2m_min[k], gwh: sl.reduce((a, b) => a + b, 0) / 1000, v: vs.reduce((a, b) => a + b, 0) / Math.max(1, vs.length) }; });
+    WX = { hours, mw, days, at: new Date() }; W.setLive(hours.slice(0, 25)); S.day = 'live'; if (!RIGHT.ops.includes('value="live"')) RIGHT.ops = RIGHT.ops.replace('<select id="sc-day">', '<select id="sc-day"><option value="live">По прогнозу погоды</option>'); const now = new Date(), tz = (j.utc_offset_seconds || 0) / 60, loc = new Date(now.getTime() + (tz + now.getTimezoneOffset()) * 60000); S.min = Math.round((loc.getHours() * 60 + loc.getMinutes()) / 5) * 5; WX.nowMin = S.min;
+    buildCurve(); if (S.stage === 'ops') setStage('ops', false);
+  } catch (e) { console.warn('weather', e); WX = { err: true }; if (S.stage === 'ops') renderWx(); }
+}
+function renderWx() { const el = $('#wx'); if (!el) return; const pill = $('#wx-pill');
+  if (!WX) { pill.textContent = 'загружаю'; el.innerHTML = '<p class="note" style="margin:0">Запрашиваю прогноз погоды для площадки…</p>'; return; }
+  if (WX.err) { pill.textContent = 'нет связи'; el.innerHTML = '<p class="note" style="margin:0">Сервис прогноза недоступен. Ветер берётся из сценария ниже.</p>'; return; }
+  const mx = Math.max(...WX.days.map(d => d.gwh), 1); pill.textContent = 'на 7 дней';
+  el.innerHTML = `<div class="wx">${WX.days.map((d, k) => { const dt = new Date(d.d + 'T12:00:00'), w = WMO(d.code); return `<div title="${w[1]}"><span>${k ? dt.toLocaleDateString('ru-RU', { weekday: 'short' }) : 'сегодня'}</span><i>${w[0]}</i><b>${fmt(d.tmax)}°</b><em>${fmt(d.v, 1)} м/с</em><u><s style="height:${Math.max(4, d.gwh / mx * 100)}%"></s></u><b>${fmt(d.gwh, 1)}</b></div>`; }).join('')}</div>
+    <p class="note">Нижнее число — выработка парка за сутки, ГВт·ч: ветер прогноза на 120 м пропущен через следы и кривую мощности. За неделю ${fmt(WX.days.reduce((a, d) => a + d.gwh, 0))} ГВт·ч. Прогноз Open-Meteo, обновлён в ${WX.at.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' })}.</p>`; }
+/* приборы в карточке ВЭУ: ветер, загрузка, мощность через 30 минут, суточный ход этой турбины */
+function wtgDash(i) { const k = v[i] > 0.1 && live.w ? v[i] / live.w.v : W.speedUp(W.elev[i], hMean), at = m => { const w = W.windAt(Math.min(1439, m), S.day); return built[i] && fault[i] !== 3 && fault[i] !== 4 ? W.power(w.v * k, rho[i]) : 0; };
+  const day = []; for (let m = 0; m < 1440; m += 30) day.push(at(m)); const p30 = at(S.min + 30), ld = pw[i] / T.rated * 100, dE = day.reduce((a, b) => a + b, 0) * .5 / 1000;
+  return `<div class="tiles" style="margin:8px 0 4px"><div class="tile"><label>Ветер на роторе</label>${gauge(v[i] / 25 * 100, fmt(v[i], 1), 'м/с')}</div>
+    <div class="tile"><label>Загрузка</label>${gauge(ld, fmt(ld) + ' %', 'от ' + fmt(T.rated / 1000, 2) + ' МВт')}</div>
+    <div class="tile"><label>Через 30 минут</label><div class="v">${fmt(p30 / 1000, 2)}<small>МВт</small></div><div class="s">${p30 > pw[i] * 1.03 ? 'растёт' : p30 < pw[i] * .97 ? 'падает' : 'без изменений'}</div></div>
+    <div class="tile"><label>За сутки</label><div class="v">${fmt(dE, 1)}<small>МВт·ч</small></div><div class="viz">${spark(day, S.min / 1440)}</div></div></div>`; }
+loadWeather();
