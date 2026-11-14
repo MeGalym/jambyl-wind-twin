@@ -481,7 +481,7 @@ function refresh() {
   yaw = Math.atan2(Math.sin(live.w.dir * RAD), -Math.cos(live.w.dir * RAD)); poseStatic(); windField(); posePlumes(); paintDots(); layers(); poseXray();
   S.stage === 'ops' ? renderOps() : S.stage === 'build' ? renderBuild() : renderCost(); renderInspector(); renderLegend(); markSel(); insets();
 }
-$('#tabs').addEventListener('click', e => { const b = e.target.closest('button'); if (b && b.dataset.stage !== S.stage) setStage(b.dataset.stage); });
+$('#tabs').addEventListener('click', e => { const b = e.target.closest('button'); if (!b) return; if (b.dataset.stage === 'wtg') return openTurbine(S.sel && S.sel.level === 'wtg' ? S.sel.i : 0); closeTurbine(); if (b.dataset.stage !== S.stage) setStage(b.dataset.stage); });
 $('#modes').addEventListener('click', e => { const b = e.target.closest('button'); if (!b) return; S.stage === 'ops' ? S.mode = b.dataset.mode : S.bmode = b.dataset.mode; $$('#modes button').forEach(x => x.setAttribute('aria-pressed', x === b)); refresh(); });
 $('#right').addEventListener('click', e => {
   const nw = e.target.closest('[data-new]'), adv = e.target.closest('[data-adv]'), ev = e.target.closest('[data-ev]'), ww = e.target.closest('[data-w]'), ss = e.target.closest('[data-ss]');
@@ -512,7 +512,7 @@ function renderInspector() {
         return `<div class="step ${done ? 'done' : now ? 'now' : ''}"><i></i><span>${x.name}</span><em>${done ? fdate(E.dateOf(x.fact)) : now ? 'в работе' : 'план ' + fdate(E.dateOf(x.plan))}</em>${late > 0 && (done || D > x.plan) ? `<small class="bad">${done ? 'сдано на' : 'просрочено на'} ${fmt(late)} дн. позже плана</small>` : done ? `<small>в срок</small>` : ''}</div>`; }).join('')}</div>
       ${obs.length ? `<div class="rows" style="margin-top:12px">${obs.map(q => `<div class="ev ${q.sev}"><i class="dot"></i><b>Замечание ${q.n}</b><em>${fmt(D - q.found)} дн.</em><span>${q.text}</span></div>`).join('')}</div>` : ''}<div class="insp-actions"><button class="btn" data-act="fly">Показать в сцене</button></div>`; return; }
   const seg = `<div class="seg">${[['wtg', 'Ветроустановка'], ['feeder', 'Фидер 35 кВ']].map(l => `<button data-level="${l[0]}" aria-pressed="${s.level === l[0]}">${l[1]}</button>`).join('')}</div>`, key = selKey(s), ev = evCache.find(x => x.key === key), od = S.orders.find(o => o.key === key);
-  const act = `<div class="insp-actions">${ev ? (od ? `<button class="btn go" data-adv="${key}">Наряд ${od.n}: ${WO[od.step].toLowerCase()} ✓</button>` : `<button class="btn go" data-new="${key}">Создать наряд бригаде</button>`) : ''}<button class="btn" data-act="fly">Показать в сцене</button></div>`;
+  const act = `<div class="insp-actions">${ev ? (od ? `<button class="btn go" data-adv="${key}">Наряд ${od.n}: ${WO[od.step].toLowerCase()} ✓</button>` : `<button class="btn go" data-new="${key}">Создать наряд бригаде</button>`) : ''}<button class="btn" data-act="fly">Показать в сцене</button>${s.level === 'wtg' ? '<button class="btn" data-act="tear">Разобрать в 3D</button>' : ''}</div>`;
   if (s.level === 'wtg') { const i = s.i, dv = pExp[i] > 1 ? (pw[i] / pExp[i] - 1) * 100 : NaN;
     el.innerHTML = `<div class="card-head"><span class="pill ${st[i] === 3 || st[i] === 6 ? 'bad' : st[i] ? 'warn' : ''}"><i></i><span>${ST_NAME[st[i]]}</span></span>${X_BTN}</div>${seg}<h3 class="insp-title">${wName(i)}</h3><div class="insp-sub">${fmt(T.rated / 1000, 2)} МВт, ротор ${T.D} м, ось ${T.hub} м. ${faultText[i] && st[i] ? faultText[i] : 'Фидер ' + (W.feeder[i] + 1) + ', трансформатор Т' + (W.feederTr[W.feeder[i]] + 1)}</div>
       <div class="big"><b>${pwf(pw[i])}</b>${Number.isNaN(dv) ? '' : `<span class="${dv < -15 ? 'bad' : dv < -3 ? 'warn' : 'ok'}">${dv < -0.5 ? '↓ ' + fmt(-dv) + ' % к расчёту' : 'в норме'}</span>`}</div>` +
@@ -524,7 +524,15 @@ function renderInspector() {
 $('#insp').addEventListener('click', e => { const act = e.target.closest('[data-act]'), lv = e.target.closest('[data-level]'), nw = e.target.closest('[data-new]'), adv = e.target.closest('[data-adv]');
   if (nw) return createOrder(nw.dataset.new); if (adv) return advanceOrder(adv.dataset.adv);
   if (lv) { const s = S.sel; if (lv.dataset.level === 'feeder' && s.level === 'wtg') return select({ level: 'feeder', f: W.feeder[s.i] }); if (lv.dataset.level === 'wtg' && s.level === 'feeder') return select({ level: 'wtg', i: W.feeders[s.f][0] }); return; }
-  if (act) act.dataset.act === 'fly' ? flyToSel() : select(null); });
+  if (act) act.dataset.act === 'fly' ? flyToSel() : act.dataset.act === 'tear' ? openTurbine(S.sel.i) : select(null); });
+
+/* ---------- турбина в 3D: отдельная страница wtg.html, собранная teardown, открывается поверх парка ---------- */
+const tabBtns = () => document.querySelectorAll('#tabs button');
+function openTurbine(i) { if (i == null) i = 0; const t = temps(i), q = new URLSearchParams({ wtg: wName(i), v: (v[i] || 0).toFixed(2), t: Math.round(live.w.temp), rho: rho[i].toFixed(3) });
+  const al = []; if (t.bear > 95) al.push('ГП1'); else if (t.bear > 80) q.set('warn', 'ГП1'); if (t.gen > 95) al.push('Г1'); if (al.length) q.set('alarm', al.join(','));
+  let box = document.getElementById('wtgview'); if (!box) { box = document.createElement('div'); box.id = 'wtgview'; box.innerHTML = '<iframe title="Ветроустановка в 3D"></iframe><button class="glass" data-close>← К парку</button>'; document.body.appendChild(box); box.querySelector('[data-close]').addEventListener('click', closeTurbine); }
+  box.querySelector('iframe').src = 'wtg.html?v=7#' + q.toString(); box.classList.add('open'); for (const b of tabBtns()) b.setAttribute('aria-pressed', b.dataset.stage === 'wtg'); }
+function closeTurbine() { const box = document.getElementById('wtgview'); if (!box || !box.classList.contains('open')) return; box.classList.remove('open'); box.querySelector('iframe').src = 'about:blank'; for (const b of tabBtns()) b.setAttribute('aria-pressed', b.dataset.stage === S.stage); }
 function selCenter(s) { if (s.level === 'ss') return { p: new THREE.Vector3(SITE.ss[0] - 10, ssY + 10, SITE.ss[1]), r: 300 }; if (s.level === 'bess') return { p: new THREE.Vector3(SITE.ss[0] + 378, ssY + 5, SITE.ss[1]), r: 330 }; if (s.level === 'wtg') return { p: new THREE.Vector3(W.X[s.i], baseY[s.i] + 95, W.Z[s.i]), r: 190 };
   const m = W.feeders[s.f]; let x = 0, z = 0; m.forEach(i => { x += W.X[i]; z += W.Z[i]; }); x /= m.length; z /= m.length; return { p: new THREE.Vector3(x, ground(x, z) + 60, z), r: 1800 }; }
 function markSel() { const s = S.sel; Object.values(labels).forEach(l => l.el.classList.toggle('sel', !!s && l.key === selKey(s))); }
@@ -591,7 +599,7 @@ canvas.addEventListener('pointerup', e => { if (!down || Math.hypot(e.clientX - 
 canvas.addEventListener('pointermove', e => { if (e.pointerType !== 'touch') hoverQ = e; }); canvas.addEventListener('pointerleave', () => { hoverQ = null; tip.style.opacity = 0; });
 function doHover() { const e = hoverQ; hoverQ = null; if (!e || e.buttons || S.stage === 'cost') { tip.style.opacity = 0; return; } const h = hitAt(e.clientX, e.clientY); if (!h) { tip.style.opacity = 0; canvas.style.cursor = ''; return; } canvas.style.cursor = 'pointer';
   tip.innerHTML = h.ss ? `Подстанция 220/35 кВ <b>${pwf(live.hv)}</b>` : h.bess ? `Накопитель <b>300 МВт / 600 МВт·ч</b>` : S.stage === 'build' ? `${wName(h.i)} <b>${E.STAGE[bState[h.i].stage].toLowerCase()}</b>` : `${wName(h.i)} <b>${pwf(pw[h.i])}, ${fmt(v[h.i], 1)} м/с</b>`; tip.style.opacity = 1; tip.style.transform = `translate(${e.clientX + 14}px,${e.clientY + 16}px)`; }
-addEventListener('keydown', e => { if (e.key === 'Escape' && document.activeElement !== q) select(null); });
+addEventListener('keydown', e => { if (e.key === 'Escape' && document.activeElement !== q) { const o = document.getElementById('wtgview'); if (o && o.classList.contains('open')) closeTurbine(); else select(null); } });
 
 /* ═════════ цикл ═════════ */
 function resize() { const w = canvas.clientWidth, h = canvas.clientHeight, pr = renderer.getPixelRatio(); if (canvas.width !== Math.floor(w * pr) || canvas.height !== Math.floor(h * pr)) { renderer.setSize(w, h, false); composer && composer.setSize(w, h); camera.aspect = w / h; camera.fov = w / h < 1.15 ? 50 : 36; camera.updateProjectionMatrix(); insets(); } }
@@ -613,4 +621,4 @@ function frame(now) {
 applyHeights(); layout(); buildCurve(); setStage('ops', false); resize(); refreshEnv();
 { const vw = VIEWS.ops; if (reduceMotion) { camera.position.set(...vw[0]); controls.target.set(...vw[1]); } else tween = { t0: performance.now() + 300, ms: 3200, p0: camera.position.clone(), p1: new THREE.Vector3(...vw[0]), a0: controls.target.clone(), a1: new THREE.Vector3(...vw[1]) }; }
 requestAnimationFrame(frame); requestAnimationFrame(() => $('#boot')?.classList.add('gone')); loadTerrain();
-window.__twin = { S, live: () => live, select, setStage, refresh, camera, controls, W, E, ground };
+window.__twin = { S, live: () => live, select, setStage, refresh, camera, controls, W, E, ground, dbg: { renderer, scene, get composer() { return composer; }, flow, poseRotors, placeLabels, sunL, terrain } };
