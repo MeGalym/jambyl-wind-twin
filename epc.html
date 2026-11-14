@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Жамбыл 1 ГВт — стройка</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Golos+Text:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="epc.css?v=2">
+</head>
+<body>
+<header id="bar">
+  <div class="brand"><b>Жамбыл 1 ГВт</b><span>Стройка</span></div>
+  <div class="date">
+    <button id="d-prev" aria-label="На неделю назад">‹</button>
+    <input id="d-range" type="range" min="0" max="1000" step="1" aria-label="Дата">
+    <button id="d-next" aria-label="На неделю вперёд">›</button>
+    <output id="d-out"></output>
+  </div>
+  <a class="link" href="index.html#build">3D-вид</a>
+</header>
+<main id="grid">
+  <aside id="left" aria-label="Слои проекта"></aside>
+  <section id="mapbox" aria-label="План площадки">
+    <div class="maphead"><b>План площадки</b><span id="map-date"></span><div class="zoom"><button id="z-out" aria-label="Отдалить">−</button><button id="z-in" aria-label="Приблизить">+</button><button id="z-fit">Вся</button></div></div>
+    <svg id="map" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="План площадки сверху"></svg>
+    <div id="legend"></div>
+  </section>
+  <aside id="right" aria-label="Состояние"></aside>
+</main>
+<input type="file" id="file" accept=".csv,.txt,.xlsx" hidden>
+<div id="toast" role="status"></div>
+<script src="site-data.js?v=20"></script>
+<script src="wind.js?v=20"></script>
+<script src="epcw.js?v=20"></script>
+<script src="fact.js?v=1"></script>
+<script src="epc.js?v=3"></script>
+</body>
+</html>

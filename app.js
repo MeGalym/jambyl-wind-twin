@@ -503,7 +503,7 @@ function refresh() {
   yaw = Math.atan2(Math.sin(live.w.dir * RAD), -Math.cos(live.w.dir * RAD)); poseStatic(); windField(); posePlumes(); paintDots(); layers(); poseXray();
   S.stage === 'ops' ? renderOps() : S.stage === 'build' ? renderBuild() : renderCost(); renderInspector(); renderLegend(); markSel(); insets();
 }
-$('#tabs').addEventListener('click', e => { const b = e.target.closest('button'); if (!b) return; if (b.dataset.stage === 'wtg') return openTurbine(S.sel && S.sel.level === 'wtg' ? S.sel.i : 0); closeTurbine(); if (b.dataset.stage !== S.stage) setStage(b.dataset.stage); });
+$('#tabs').addEventListener('click', e => { const b = e.target.closest('button'); if (!b) return; if (b.dataset.stage === 'wtg') return openTurbine(S.sel && S.sel.level === 'wtg' ? S.sel.i : 0); if (b.dataset.stage === 'build' && S.stage !== 'build') { location.href = 'epc.html'; return; } closeTurbine(); if (b.dataset.stage !== S.stage) setStage(b.dataset.stage); });
 $('#modes').addEventListener('click', e => { const b = e.target.closest('button'); if (!b) return; S.stage === 'ops' ? S.mode = b.dataset.mode : S.bmode = b.dataset.mode; $$('#modes button').forEach(x => x.setAttribute('aria-pressed', x === b)); refresh(); });
 $('#right').addEventListener('click', e => {
   const nw = e.target.closest('[data-new]'), adv = e.target.closest('[data-adv]'), ev = e.target.closest('[data-ev]'), ww = e.target.closest('[data-w]'), ss = e.target.closest('[data-ss]');
@@ -777,3 +777,5 @@ function buildCard(i) { const D = S.bday, b = bState[i], d = E.detail(i, D), obs
 $('#insp').addEventListener('click', e => { const b = e.target.closest('[data-j]'); if (!b || !S.sel || S.sel.level !== 'wtg') return; const i = S.sel.i, d = E.detail(i, S.bday), n = $('#j-note');
   JOURNAL.push({ i, day: S.bday, kind: b.dataset.j, note: n ? n.value.trim() : '', stage: d.stage, pct: Math.round(d.pct * 100), at: Date.now() }); try { localStorage.setItem('jambyl-journal', JSON.stringify(JOURNAL.slice(-500))); } catch (err) {} renderInspector(); });
 $('#legend').addEventListener('click', e => { const b = e.target.closest('[data-w]'); if (b) select({ level: 'wtg', i: +b.dataset.w }, true); });
+
+if (location.hash === '#build') setStage('build');
