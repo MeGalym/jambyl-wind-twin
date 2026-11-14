@@ -244,6 +244,8 @@ table.boq{width:100%;border-collapse:collapse;font-size:12px}
 .fin select option{background:#161c2a}
 
 #sld{position:fixed;left:190px;right:calc(var(--rw) + 44px);top:78px;z-index:3;max-height:calc(100% - 290px);overflow:auto;scrollbar-width:none}
-#insp .kv dd{white-space:normal;max-width:60%}
+#insp .kv{grid-template-columns:minmax(0,1fr) fit-content(56%)}
+#insp .kv dd{white-space:normal}
+#insp .kv dt{overflow-wrap:anywhere}
 .lbl span:only-child,.lbl b:first-child{margin-left:0}
 @media (max-width:760px){#sld{position:static;width:auto;max-height:none}}
