@@ -1,0 +1,484 @@
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { Sky } from 'three/addons/objects/Sky.js';
+
+const SITE = window.SITE, W = window.WIND, E = window.EPCW, N = W.N, T = W.T;
+const $ = s => document.querySelector(s), $$ = s => document.querySelectorAll(s);
+const RAD = Math.PI / 180, DEG = 180 / Math.PI;
+const fmt = (v, d = 0) => (+v).toLocaleString('ru-RU', { minimumFractionDigits: d, maximumFractionDigits: d });
+const fdate = d => d.toLocaleDateString('ru-RU', { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC' }).replace(' г.', '');
+const hhmm = m => String(Math.floor(m / 60)).padStart(2, '0') + ':' + String(Math.round(m % 60)).padStart(2, '0');
+const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)').matches, PHONE = matchMedia('(max-width:760px)').matches;
+function rng(seed) { return () => { seed |= 0; seed = seed + 0x6D2B79F5 | 0; let t = Math.imul(seed ^ seed >>> 15, 1 | seed); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
+const R = rng(1000), pick = n => Math.floor(R() * n);
+const wName = i => SITE.wtg[i][0], COMP = ['С', 'ССВ', 'СВ', 'ВСВ', 'В', 'ВЮВ', 'ЮВ', 'ЮЮВ', 'Ю', 'ЮЮЗ', 'ЮЗ', 'ЗЮЗ', 'З', 'ЗСЗ', 'СЗ', 'ССЗ'], compass = d => COMP[Math.round(d / 22.5) % 16];
+
+/* ═════════ состояние и модель эксплуатации ═════════ */
+const S = { stage: 'ops', min: 780, day: 'normal', bday: 600, mode: 'real', bmode: 'stat', sel: null, playing: false, orders: [], fixed: 0, econ: {} };
+// условные отказы: 0 работает, 3 авария, 4 обслуживание, 5 ограничение мощности
+const fault = new Uint8Array(N), faultText = {}, derate = new Float32Array(N).fill(1), tripped = new Uint8Array(W.NF);
+[['Перегрев подшипника генератора', 3], ['Отказ привода поворота лопасти', 3], ['Ошибка преобразователя частоты', 3], ['Плановое обслуживание', 4], ['Плановое обслуживание', 4]].forEach(([t, c]) => { let i; do i = pick(N); while (fault[i]); fault[i] = c; faultText[i] = t; });
+[['Рассогласование по ветру 9°', 0.91], ['Малошумный режим', 0.8]].forEach(([t, k]) => { let i; do i = pick(N); while (fault[i]); fault[i] = 5; faultText[i] = t; derate[i] = k; });
+tripped[pick(W.NF)] = 1;
+const vf = new Float32Array(N), v = new Float32Array(N), def = new Float32Array(N), pw = new Float32Array(N), pExp = new Float32Array(N), rho = new Float32Array(N), run = new Uint8Array(N), st = new Uint8Array(N), rpm = new Float32Array(N), built = new Uint8Array(N).fill(1);
+let live = {}, hMean = 1100;
+function compute(min) {
+  const w = W.windAt(min, S.day);
+  for (let i = 0; i < N; i++) {
+    vf[i] = w.v * W.speedUp(W.elev[i], hMean) * (1 + 0.05 * Math.sin(min / 9 + i * 1.7) + 0.03 * Math.sin(min / 2.3 + i * 0.9)); rho[i] = W.density(W.elev[i] + T.hub, w.temp);
+    run[i] = built[i] && fault[i] !== 3 && fault[i] !== 4 && !tripped[W.feeder[i]] && vf[i] >= T.cutIn && vf[i] < T.cutOut ? 1 : 0;
+  }
+  W.wake(w.dir, vf, rho, run, v, def);
+  let free = 0, waked = 0, act = 0;
+  for (let i = 0; i < N; i++) {
+    const ok = built[i] ? W.power(v[i], rho[i]) : 0; pExp[i] = ok; free += built[i] ? W.power(vf[i], rho[i]) : 0; waked += ok;
+    pw[i] = run[i] ? ok * derate[i] : 0; act += pw[i];
+    st[i] = !built[i] ? 9 : tripped[W.feeder[i]] ? 6 : fault[i] === 3 ? 3 : fault[i] === 4 ? 4 : v[i] >= T.cutOut ? 2 : v[i] < T.cutIn ? 1 : fault[i] === 5 ? 5 : 0;
+    rpm[i] = run[i] ? W.rpm(v[i]) : 0.15;
+  }
+  const c = W.collect(pw, tripped);
+  return { w, free, waked, act, mv: c.mvLoss, tr: c.trLoss, hv: c.hv, trLoad: c.trLoad, fP: c.fP };
+}
+let curve = [], windC = [], bess = [], soc = [], eDay = 0;
+function buildCurve() {
+  curve = []; windC = []; for (let m = 0; m <= 1440; m += 10) { const r = compute(m); curve.push(r.hv / 1000); windC.push(r.w.v); }
+  bess = []; soc = []; let e = W.EL.bessMwh * 0.5;                      // накопитель сглаживает выдачу вокруг скользящего среднего
+  for (let k = 0; k < curve.length; k++) { let ma = 0, n = 0; for (let j = Math.max(0, k - 9); j <= Math.min(curve.length - 1, k + 9); j++) { ma += curve[j]; n++; }
+    let p = Math.max(-W.EL.bessMw, Math.min(W.EL.bessMw, curve[k] - ma / n)); if (p > 0) p = Math.min(p, (W.EL.bessMwh * 0.95 - e) * 6); else p = Math.max(p, -(e - W.EL.bessMwh * 0.05) * 6);
+    e += p / 6; bess.push(p); soc.push(e / W.EL.bessMwh); }
+  eDay = curve.reduce((s, x, i) => i ? s + (x + curve[i - 1]) / 12 : 0, 0);
+}
+const energyUntil = min => { let e = 0; const n = Math.floor(min / 10); for (let i = 1; i <= n; i++) e += (curve[i] + curve[i - 1]) / 12; return e; };
+
+/* ═════════ сцена ═════════ */
+const canvas = $('#scene');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance', logarithmicDepthBuffer: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2)); renderer.toneMapping = THREE.ACESFilmicToneMapping; renderer.shadowMap.enabled = true; renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+const scene = new THREE.Scene(); scene.fog = new THREE.Fog(0xb9c4d2, 14000, 90000);
+const camera = new THREE.PerspectiveCamera(36, 1, 5, 200000); camera.position.set(-22000, 16000, 30000);
+const controls = new OrbitControls(camera, canvas);
+Object.assign(controls, { enableDamping: true, dampingFactor: .08, maxPolarAngle: 87 * RAD, minDistance: 60, maxDistance: 60000, zoomToCursor: true });
+const sky = new Sky(); sky.scale.setScalar(150000); Object.assign(sky.material.uniforms.turbidity, { value: 4 }); sky.material.uniforms.rayleigh.value = 1.2; sky.material.uniforms.mieCoefficient.value = .004; sky.material.uniforms.mieDirectionalG.value = .82; scene.add(sky);
+const pmrem = new THREE.PMREMGenerator(renderer), envScene = new THREE.Scene(); let envRT = null, envDirty = true, envTimer = 0;
+const hemi = new THREE.HemisphereLight(0xcfe0ff, 0x8a7a5c, 1); scene.add(hemi);
+const sunL = new THREE.DirectionalLight(0xfff1dc, 3); sunL.castShadow = true; sunL.shadow.mapSize.set(PHONE ? 2048 : 4096, PHONE ? 2048 : 4096); sunL.shadow.bias = -0.0005; sunL.shadow.normalBias = 1.5; scene.add(sunL, sunL.target);
+function sunAt(min) { const doy = S.stage === 'build' ? 200 : 172, H = (min / 60 + (69.8 - 75) / 15 - 12) * 15 * RAD, dec = 23.44 * RAD * Math.sin(2 * Math.PI * (284 + doy) / 365), lat = 43.35 * RAD;
+  const up = Math.sin(lat) * Math.sin(dec) + Math.cos(lat) * Math.cos(dec) * Math.cos(H); return new THREE.Vector3(-Math.cos(dec) * Math.sin(H), up, -(Math.cos(lat) * Math.sin(dec) - Math.sin(lat) * Math.cos(dec) * Math.cos(H))); }
+function applySun(min) {
+  const d = sunAt(min), el = Math.asin(d.y) * DEG; sky.material.uniforms.sunPosition.value.copy(d);
+  const k = THREE.MathUtils.smoothstep(el, -3, 9), low = THREE.MathUtils.smoothstep(el, 0, 22);
+  sunL.intensity = 3.4 * k; sunL.color.setRGB(1, .72 + .26 * low, .5 + .44 * low); sunL.userData.dir = d.y > 0.03 ? d : new THREE.Vector3(d.x, 0.03, d.z).normalize();
+  hemi.intensity = .1 + .95 * k; hemi.color.setRGB(.55 + .3 * k, .66 + .22 * k, 1); hemi.groundColor.setRGB(.5 * k + .05, .44 * k + .05, .33 * k + .06);
+  scene.fog.color.set(0x0b1019).lerp(new THREE.Color(0xd2a383), k).lerp(new THREE.Color(0xbcc7d4), low); renderer.toneMappingExposure = .34 + .2 * k; envDirty = true; live.night = el < 0; live.el = el;
+}
+function refreshEnv() { envScene.add(sky); const rt = pmrem.fromScene(envScene, 0, 1, 200000); scene.add(sky); if (envRT) envRT.dispose(); envRT = rt; scene.environment = rt.texture; scene.environmentIntensity = .25 + .75 * THREE.MathUtils.smoothstep(live.el ?? 40, -4, 10); }
+
+/* рельеф: сетка высот, заполняется из открытых тайлов высот; подложка — спутниковый снимок */
+const TX0 = -11000, TX1 = 11500, TZ0 = -13500, TZ1 = 13500, STEP = 75, NX = Math.round((TX1 - TX0) / STEP) + 1, NZ = Math.round((TZ1 - TZ0) / STEP) + 1;
+const hAbs = new Float32Array(NX * NZ); let E0 = 1000;
+for (let j = 0; j < NZ; j++) for (let i = 0; i < NX; i++) { const x = TX0 + i * STEP, z = TZ0 + j * STEP; hAbs[j * NX + i] = 1100 + 55 * Math.sin(x / 2600 + 1) * Math.cos(z / 3100) + 30 * Math.sin(x / 900 + z / 1300) - z * 0.012; }
+function ground(x, z) { const fx = Math.max(0, Math.min(NX - 1.001, (x - TX0) / STEP)), fz = Math.max(0, Math.min(NZ - 1.001, (z - TZ0) / STEP)), i = fx | 0, j = fz | 0, a = fx - i, b = fz - j, k = j * NX + i;
+  return (hAbs[k] * (1 - a) * (1 - b) + hAbs[k + 1] * a * (1 - b) + hAbs[k + NX] * (1 - a) * b + hAbs[k + NX + 1] * a * b) - E0; }
+const M = SITE.meta, lonOf = x => M.lon0 + x / M.kx, latOf = z => M.lat0 - z / M.kz;
+const tX = (lon, zm) => (lon + 180) / 360 * 2 ** zm, tY = (lat, zm) => (1 - Math.log(Math.tan(lat * RAD) + 1 / Math.cos(lat * RAD)) / Math.PI) / 2 * 2 ** zm;
+const terGeo = new THREE.PlaneGeometry(TX1 - TX0, TZ1 - TZ0, NX - 1, NZ - 1); terGeo.rotateX(-Math.PI / 2); terGeo.translate((TX0 + TX1) / 2, 0, (TZ0 + TZ1) / 2);
+const terMat = new THREE.MeshStandardMaterial({ color: 0xb9ac8a, roughness: 1, metalness: 0 }), terrain = new THREE.Mesh(terGeo, terMat); terrain.receiveShadow = true; scene.add(terrain);
+function applyHeights() {
+  let mn = 1e9, sm = 0; for (let k = 0; k < hAbs.length; k++) { if (hAbs[k] < mn) mn = hAbs[k]; } E0 = mn;
+  const p = terGeo.attributes.position; for (let k = 0; k < p.count; k++) p.setY(k, hAbs[k] - E0); p.needsUpdate = true; terGeo.computeVertexNormals(); terGeo.computeBoundingSphere();
+  for (let i = 0; i < N; i++) { W.elev[i] = ground(W.X[i], W.Z[i]) + E0; sm += W.elev[i]; } hMean = sm / N; W.resetAep();
+}
+async function mosaic(zm, url, onTile) {
+  const x0 = Math.floor(tX(lonOf(TX0), zm)), x1 = Math.floor(tX(lonOf(TX1), zm)), y0 = Math.floor(tY(latOf(TZ0), zm)), y1 = Math.floor(tY(latOf(TZ1), zm));
+  const cv = document.createElement('canvas'); cv.width = (x1 - x0 + 1) * 256; cv.height = (y1 - y0 + 1) * 256; const g = cv.getContext('2d', { willReadFrequently: true }); let ok = 0, bad = 0; const jobs = [];
+  for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) jobs.push(new Promise(res => { const im = new Image(); im.crossOrigin = 'anonymous'; im.onload = () => { g.drawImage(im, (x - x0) * 256, (y - y0) * 256); ok++; onTile && onTile(); res(); }; im.onerror = () => { bad++; res(); }; im.src = url(zm, x, y); }));
+  await Promise.all(jobs); return { cv, g, x0, y0, zm, ok, bad };
+}
+async function loadTerrain() {
+  const status = $('#status'); status.textContent = 'Загружаю рельеф и спутниковый снимок…';
+  let demOk = false, imgOk = false;
+  try { const d = await mosaic(12, (z, x, y) => `https://s3.amazonaws.com/elevation-tiles-prod/terrarium/${z}/${x}/${y}.png`);
+    if (d.ok && !d.bad) { const px = d.g.getImageData(0, 0, d.cv.width, d.cv.height).data, wd = d.cv.width, ht = d.cv.height;
+      const smp = (x, z) => { const fx = Math.max(0, Math.min(wd - 1.001, (tX(lonOf(x), 12) - d.x0) * 256)), fy = Math.max(0, Math.min(ht - 1.001, (tY(latOf(z), 12) - d.y0) * 256)), i = fx | 0, j = fy | 0, a = fx - i, b = fy - j;
+        const h = k => px[k] * 256 + px[k + 1] + px[k + 2] / 256 - 32768, k = (j * wd + i) * 4; return h(k) * (1 - a) * (1 - b) + h(k + 4) * a * (1 - b) + h(k + wd * 4) * (1 - a) * b + h(k + wd * 4 + 4) * a * b; };
+      for (let j = 0; j < NZ; j++) for (let i = 0; i < NX; i++) hAbs[j * NX + i] = smp(TX0 + i * STEP, TZ0 + j * STEP);
+      demOk = true; applyHeights(); layout(); buildCurve(); refresh(); } } catch (e) { console.warn('DEM', e); }
+  try { const zm = PHONE ? 13 : 14; let tex = null, last = 0; const uv = terGeo.attributes.uv;
+    const d = await mosaic(zm, (z, x, y) => `https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/${z}/${y}/${x}`, () => { if (tex && performance.now() - last > 400) { tex.needsUpdate = true; last = performance.now(); } });
+    if (d.ok > d.bad) { for (let j = 0; j < NZ; j++) for (let i = 0; i < NX; i++) uv.setXY(j * NX + i, (tX(lonOf(TX0 + i * STEP), zm) - d.x0) * 256 / d.cv.width, 1 - (tY(latOf(TZ0 + j * STEP), zm) - d.y0) * 256 / d.cv.height);
+      uv.needsUpdate = true; tex = new THREE.CanvasTexture(d.cv); tex.colorSpace = THREE.SRGBColorSpace; tex.anisotropy = 8; terMat.map = tex; terMat.color.set(0xffffff); terMat.needsUpdate = true; imgOk = true; } } catch (e) { console.warn('imagery', e); }
+  S.terrain = { demOk, imgOk }; status.textContent = demOk && imgOk ? '' : 'Картографический сервис недоступен: рельеф и подложка условные'; setSrc();
+}
+
+/* вспомогательная геометрия: линии и ленты, уложенные на рельеф */
+function drape(flat, step, lift) { const o = []; for (let i = 0; i + 3 < flat.length; i += 2) { const ax = flat[i], az = flat[i + 1], bx = flat[i + 2], bz = flat[i + 3], n = Math.max(1, Math.ceil(Math.hypot(bx - ax, bz - az) / step));
+    for (let k = i ? 1 : 0; k <= n; k++) { const x = ax + (bx - ax) * k / n, z = az + (bz - az) * k / n; o.push(x, ground(x, z) + lift, z); } } return o; }
+function lineOf(polys, step, lift, mat) { const seg = []; for (const f of polys) { const p = drape(f, step, lift); for (let i = 0; i + 5 < p.length; i += 3) seg.push(p[i], p[i + 1], p[i + 2], p[i + 3], p[i + 4], p[i + 5]); }
+  const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.Float32BufferAttribute(seg, 3)); return new THREE.LineSegments(g, mat); }
+function ribbonOf(polys, wdt, lift, mat) { const pos = [], idx = []; for (const f of polys) { const p = drape(f, 30, lift), n = p.length / 3, b = pos.length / 3;
+    for (let i = 0; i < n; i++) { const a = Math.max(0, i - 1) * 3, c = Math.min(n - 1, i + 1) * 3; let dx = p[c] - p[a], dz = p[c + 2] - p[a + 2]; const l = Math.hypot(dx, dz) || 1; dx /= l; dz /= l;
+      pos.push(p[i * 3] - dz * wdt / 2, p[i * 3 + 1], p[i * 3 + 2] + dx * wdt / 2, p[i * 3] + dz * wdt / 2, p[i * 3 + 1], p[i * 3 + 2] - dx * wdt / 2); if (i) { const k = b + i * 2; idx.push(k - 2, k, k - 1, k - 1, k, k + 1); } } }
+  const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3)); g.setIndex(idx); g.computeVertexNormals(); const m = new THREE.Mesh(g, mat); m.receiveShadow = true; return m; }
+
+/* ВЭУ: башни, гондолы, лопасти — экземпляры одной геометрии */
+const white = new THREE.MeshStandardMaterial({ color: 0xe4e7ea, roughness: .5, metalness: .1 }), grey = new THREE.MeshStandardMaterial({ color: 0x9aa0a8, roughness: .7, metalness: .4 }), dark = new THREE.MeshStandardMaterial({ color: 0x3b424d, roughness: .7, metalness: .3 }), concrete = new THREE.MeshStandardMaterial({ color: 0x8f8b80, roughness: 1 });
+const towers = new THREE.InstancedMesh(new THREE.CylinderGeometry(2.1, 3.5, T.hub, 14).translate(0, T.hub / 2, 0), white, N); towers.castShadow = true;
+const nacelles = new THREE.InstancedMesh(new THREE.BoxGeometry(4.6, 4.8, 15).translate(0, 0, -2.5), white, N); nacelles.castShadow = true;
+const hubs = new THREE.InstancedMesh(new THREE.SphereGeometry(2.7, 14, 10).scale(1, 1, 1.4).translate(0, 0, 7), white, N);
+const BL = T.D / 2 - 2, bladeGeo = new THREE.CylinderGeometry(0.28, 2.1, BL, 8).scale(1, 1, 0.28).translate(0, BL / 2 + 2, 7.4);
+const blades = new THREE.InstancedMesh(bladeGeo, white, N * 3); blades.castShadow = true;
+const founds = new THREE.InstancedMesh(new THREE.CylinderGeometry(11.5, 12.5, 1.2, 24), concrete, N); founds.receiveShadow = true;
+const pads = new THREE.InstancedMesh(new THREE.BoxGeometry(70, .5, 42), new THREE.MeshStandardMaterial({ color: 0xa79a80, roughness: 1 }), N); pads.receiveShadow = true;
+const pickMesh = new THREE.InstancedMesh(new THREE.CylinderGeometry(55, 55, T.hub + 95, 8).translate(0, (T.hub + 95) / 2, 0), white, N); pickMesh.visible = false;
+const cranes = new THREE.InstancedMesh(new THREE.BoxGeometry(3, 150, 3).translate(0, 75, 0), new THREE.MeshStandardMaterial({ color: 0xf5b544, roughness: .6 }), 4);
+const dotGeo = new THREE.BufferGeometry(), dotPos = new Float32Array(N * 3), dotCol = new Float32Array(N * 3); dotGeo.setAttribute('position', new THREE.BufferAttribute(dotPos, 3)); dotGeo.setAttribute('color', new THREE.BufferAttribute(dotCol, 3));
+const dots = new THREE.Points(dotGeo, new THREE.PointsMaterial({ size: PHONE ? 6 : 7, sizeAttenuation: false, vertexColors: true, toneMapped: false, depthTest: false })); dots.renderOrder = 4; dots.frustumCulled = false;
+scene.add(towers, nacelles, hubs, blades, founds, pads, pickMesh, cranes, dots);
+const baseY = new Float32Array(N), padDir = new Float32Array(N), rot = new Float32Array(N), towerK = new Float32Array(N).fill(1), nacOn = new Uint8Array(N).fill(1), bladeN = new Uint8Array(N).fill(3), foundK = new Float32Array(N).fill(1), padOn = new Uint8Array(N).fill(1);
+{ const pts = []; SITE.roads.forEach(f => { for (let i = 0; i < f.length; i += 2) pts.push([f[i], f[i + 1]]); });   // площадка стоит со стороны ближайшей дороги
+  for (let i = 0; i < N; i++) { let bd = 1e9, b = null; for (const p of pts) { const d = (p[0] - W.X[i]) ** 2 + (p[1] - W.Z[i]) ** 2; if (d < bd && d > 400) { bd = d; b = p; } } padDir[i] = Math.atan2(b[0] - W.X[i], b[1] - W.Z[i]); rot[i] = R() * 6.28; } }
+const dm = new THREE.Object3D(), ZERO = new THREE.Matrix4().makeScale(0, 0, 0), qY = new THREE.Quaternion(), qS = new THREE.Quaternion(), AX_Y = new THREE.Vector3(0, 1, 0), AX_Z = new THREE.Vector3(0, 0, 1);
+let yaw = 0, ssY = 0;
+function poseStatic() {
+  for (let i = 0; i < N; i++) { const x = W.X[i], z = W.Z[i], y = baseY[i];
+    dm.rotation.set(0, 0, 0); dm.scale.set(1, Math.max(towerK[i], 0), 1); dm.position.set(x, y, z); dm.updateMatrix(); towerK[i] > 0 ? towers.setMatrixAt(i, dm.matrix) : towers.setMatrixAt(i, ZERO); pickMesh.setMatrixAt(i, dm.matrix.clone().scale(new THREE.Vector3(1, 1 / Math.max(towerK[i], 1e-3), 1)));
+    dm.scale.set(1, 1, 1); dm.position.set(x, y + .2, z); dm.updateMatrix(); foundK[i] > 0 ? founds.setMatrixAt(i, dm.matrix) : founds.setMatrixAt(i, ZERO);
+    dm.rotation.set(0, padDir[i], 0); dm.position.set(x + Math.sin(padDir[i]) * 48, y + .15, z + Math.cos(padDir[i]) * 48); dm.updateMatrix(); padOn[i] ? pads.setMatrixAt(i, dm.matrix) : pads.setMatrixAt(i, ZERO);
+    dotPos[i * 3] = x; dotPos[i * 3 + 1] = y + (nacOn[i] ? T.hub + 8 : 14 + towerK[i] * T.hub); dotPos[i * 3 + 2] = z; }
+  towers.instanceMatrix.needsUpdate = founds.instanceMatrix.needsUpdate = pads.instanceMatrix.needsUpdate = pickMesh.instanceMatrix.needsUpdate = true; dotGeo.attributes.position.needsUpdate = true; pickMesh.computeBoundingSphere();
+}
+function poseRotors(dt) {
+  qY.setFromAxisAngle(AX_Y, yaw);
+  for (let i = 0; i < N; i++) {
+    if (!nacOn[i]) { nacelles.setMatrixAt(i, ZERO); hubs.setMatrixAt(i, ZERO); for (let k = 0; k < 3; k++) blades.setMatrixAt(i * 3 + k, ZERO); continue; }
+    dm.position.set(W.X[i], baseY[i] + T.hub + 1.5, W.Z[i]); dm.quaternion.copy(qY); dm.scale.set(1, 1, 1); dm.updateMatrix(); nacelles.setMatrixAt(i, dm.matrix); hubs.setMatrixAt(i, dm.matrix);
+    rot[i] += rpm[i] * 0.10472 * dt;
+    for (let k = 0; k < 3; k++) { if (k >= bladeN[i]) { blades.setMatrixAt(i * 3 + k, ZERO); continue; } qS.setFromAxisAngle(AX_Z, rot[i] + k * 2.0944); dm.quaternion.copy(qY).multiply(qS); dm.updateMatrix(); blades.setMatrixAt(i * 3 + k, dm.matrix); }
+  }
+  dm.quaternion.identity(); nacelles.instanceMatrix.needsUpdate = hubs.instanceMatrix.needsUpdate = blades.instanceMatrix.needsUpdate = true;
+}
+
+/* объекты, зависящие от рельефа: дороги, траншеи, зоны, подстанция, ВЛ */
+const dyn = new THREE.Group(); scene.add(dyn); let trenchG, zoneG, feederG, labelsSS = null, ohlG;
+const TR_COL = { B1: 0x39e75f, B2: 0xff5a4a, B3: 0x4d8dff, B4: 0xff9b2e }, TR_NAME = { B1: 'одна цепь', B2: 'две цепи', B3: 'три цепи', B4: 'четыре цепи' };
+const feederCol = f => new THREE.Color().setHSL((f * 0.618) % 1, .7, .58);
+function box(w, h, d, mat, x, y, z, parent) { const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat); m.position.set(x, y + h / 2, z); m.castShadow = m.receiveShadow = true; parent.add(m); return m; }
+function layout() {
+  dyn.clear(); for (let i = 0; i < N; i++) baseY[i] = ground(W.X[i], W.Z[i]);
+  dyn.add(ribbonOf(SITE.roads, 9, 0.6, new THREE.MeshStandardMaterial({ color: 0xc9bea6, roughness: 1, polygonOffset: true, polygonOffsetFactor: -4, polygonOffsetUnits: -4 })));
+  trenchG = new THREE.Group(); for (const k of ['B1', 'B2', 'B3', 'B4']) trenchG.add(lineOf(SITE.trench[k], 60, 2.5, new THREE.LineBasicMaterial({ color: TR_COL[k], toneMapped: false }))); dyn.add(trenchG);
+  zoneG = new THREE.Group(); const ZC = { arch: 0xc77dff, bio: 0x4ade80, anthrax: 0xff5a4a }; for (const kind of ['arch', 'bio', 'anthrax']) zoneG.add(lineOf(SITE.zones.filter(q => q[0] === kind).map(q => q.slice(1)), 80, 6, new THREE.LineBasicMaterial({ color: ZC[kind], toneMapped: false }))); dyn.add(zoneG);
+  feederG = new THREE.Group(); { const seg = [], col = []; W.feeders.forEach((m, f) => { const c = feederCol(f); for (let k = 0; k < m.length; k++) { const a = m[k], bx = k + 1 < m.length ? W.X[m[k + 1]] : SITE.ss[0], bz = k + 1 < m.length ? W.Z[m[k + 1]] : SITE.ss[1];
+        seg.push(W.X[a], baseY[a] + T.hub + 8, W.Z[a], bx, ground(bx, bz) + (k + 1 < m.length ? T.hub + 8 : 30), bz); col.push(c.r, c.g, c.b, c.r, c.g, c.b); } });
+    const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.Float32BufferAttribute(seg, 3)); g.setAttribute('color', new THREE.Float32BufferAttribute(col, 3)); feederG.add(new THREE.LineSegments(g, new THREE.LineBasicMaterial({ vertexColors: true, toneMapped: false, transparent: true, opacity: .9 }))); } dyn.add(feederG);
+  // подстанция 33/220 кВ и накопитель (компоновка условная: в RFP только однолинейная схема)
+  const sx = SITE.ss[0], sz = SITE.ss[1]; let sy = -1e9; for (const [ax, az] of [[-150, -128], [228, -128], [228, 128], [-150, 128], [40, 0]]) sy = Math.max(sy, ground(sx + ax, sz + az)); const ss = new THREE.Group(); ss.position.set(sx, sy, sz); dyn.add(ss);
+  box(384, 60, 262, concrete, 39, -59.4, 0, ss);
+  for (let k = 0; k < W.EL.trafos; k++) { const x = -75 + k * 50; box(11, 8, 7, dark, x, 0, -20, ss).userData.ss = 1; box(14, 5.5, 2.5, grey, x, 1, -26, ss); box(14, 5.5, 2.5, grey, x, 1, -14, ss); box(1, 9, 1, grey, x - 3, 8, -20, ss); box(1, 9, 1, grey, x + 3, 8, -20, ss); }
+  box(120, 8, 18, white, 0, 0, 25, ss).userData.ss = 1; box(121, .6, 19, dark, 0, 8, 25, ss); box(40, 7, 16, white, -95, 0, 60, ss); box(41, .5, 17, dark, -95, 7, 60, ss);
+  const gant = new THREE.Group(); for (let k = 0; k < 8; k++) { const x = -105 + k * 30; box(1.2, 17, 1.2, grey, x, 0, -62, gant); box(1.2, 17, 1.2, grey, x, 0, -98, gant); box(1.2, 1.2, 37, grey, x, 16, -80, gant); } box(212, 1, 1, grey, 0, 12, -62, gant); box(212, 1, 1, grey, 0, 12, -98, gant); ss.add(gant);
+  const bc = new THREE.InstancedMesh(new THREE.BoxGeometry(12.2, 2.9, 2.44), white, 120); bc.castShadow = true; for (let k = 0; k < 120; k++) { dm.rotation.set(0, 0, 0); dm.scale.set(1, 1, 1); dm.position.set(105 + (k % 6) * 17, 2, -100 + Math.floor(k / 6) * 9.5); dm.updateMatrix(); bc.setMatrixAt(k, dm.matrix); } ss.add(bc);
+  for (let k = 0; k < 10; k++) box(5, 3, 3, dark, 215, .2, -95 + k * 19, ss);
+  { const f = [[-150, -128], [228, -128], [228, 128], [-150, 128], [-150, -128]], seg = []; for (let i = 0; i < 4; i++) for (const y of [1, 2, 3]) seg.push(f[i][0], y, f[i][1], f[i + 1][0], y, f[i + 1][1]); const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.Float32BufferAttribute(seg, 3)); ss.add(new THREE.LineSegments(g, new THREE.LineBasicMaterial({ color: 0x6d7480 }))); }
+  // три двухцепные ВЛ 220 кВ: две на юго-восток к ПС Жамбыл, одна на запад к ПС Кентау (направления условные)
+  ohlG = new THREE.Group(); dyn.add(ohlG); const tw = [], wires = [];
+  [[112, -40], [112, 40], [283, 0]].forEach(([brg, off]) => { const dx = Math.sin(brg * RAD), dz = -Math.cos(brg * RAD), px = -dz * off, pz = dx * off; let prev = null;
+    for (let k = 0; k < 60; k++) { const x = sx + dx * (160 + k * 380) + px, z = sz + dz * (160 + k * 380) + pz; if (x < TX0 + 300 || x > TX1 - 300 || z < TZ0 + 300 || z > TZ1 - 300) break; const y = ground(x, z); tw.push([x, y, z, brg]);
+      if (prev) for (const s of [-1, 1]) for (const h of [24, 31, 38]) { const ox = -dz * s * (9 - (h - 24) * .2), oz = dx * s * (9 - (h - 24) * .2), mx = (prev[0] + x) / 2 + ox, mz = (prev[2] + z) / 2 + oz;
+          wires.push(prev[0] + ox, prev[1] + h, prev[2] + oz, mx, (prev[1] + y) / 2 + h - 9, mz, mx, (prev[1] + y) / 2 + h - 9, mz, x + ox, y + h, z + oz); }
+      prev = [x, y, z]; } });
+  const tm = new THREE.InstancedMesh(new THREE.CylinderGeometry(.9, 4.2, 44, 4).translate(0, 22, 0), grey, tw.length), am = new THREE.InstancedMesh(new THREE.BoxGeometry(20, .8, .8), grey, tw.length * 3); tm.castShadow = true;
+  tw.forEach(([x, y, z, b], i) => { dm.scale.set(1, 1, 1); dm.rotation.set(0, -b * RAD + Math.PI / 4, 0); dm.position.set(x, y, z); dm.updateMatrix(); tm.setMatrixAt(i, dm.matrix); [24, 31, 38].forEach((h, k) => { dm.rotation.set(0, -b * RAD, 0); dm.position.set(x, y + h, z); dm.scale.set(1 - k * .12, 1, 1); dm.updateMatrix(); am.setMatrixAt(i * 3 + k, dm.matrix); }); });
+  dm.scale.set(1, 1, 1); ohlG.add(tm, am); { const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.Float32BufferAttribute(wires, 3)); ohlG.add(new THREE.LineSegments(g, new THREE.LineBasicMaterial({ color: 0x2c3138, transparent: true, opacity: .8 }))); }
+  if (labels.ss) labels.ss.p.set(sx, sy + 40, sz); ssY = sy; poseStatic(); layers();
+}
+
+/* потоки ветра */
+const NPART = PHONE ? 700 : 1800, partPos = new Float32Array(NPART * 6), partXZ = new Float32Array(NPART * 3), partGeo = new THREE.BufferGeometry(); partGeo.setAttribute('position', new THREE.BufferAttribute(partPos, 3));
+for (let k = 0; k < NPART; k++) { partXZ[k * 3] = TX0 + R() * (TX1 - TX0); partXZ[k * 3 + 1] = TZ0 + R() * (TZ1 - TZ0); partXZ[k * 3 + 2] = 40 + R() * 190; }
+const streaks = new THREE.LineSegments(partGeo, new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: .34, toneMapped: false, depthWrite: false })); streaks.frustumCulled = false; scene.add(streaks);
+function flow(dt) { const w = live.w; if (!w || !streaks.visible) return; const fx = -Math.sin(w.dir * RAD), fz = Math.cos(w.dir * RAD), sp = w.v * 14 * dt, len = 60 + w.v * 22;
+  for (let k = 0; k < NPART; k++) { let x = partXZ[k * 3] + fx * sp, z = partXZ[k * 3 + 1] + fz * sp; if (x < TX0 || x > TX1 || z < TZ0 || z > TZ1) { x = TX0 + Math.random() * (TX1 - TX0); z = TZ0 + Math.random() * (TZ1 - TZ0); } partXZ[k * 3] = x; partXZ[k * 3 + 1] = z; const y = ground(x, z) + partXZ[k * 3 + 2];
+    partPos[k * 6] = x; partPos[k * 6 + 1] = y; partPos[k * 6 + 2] = z; partPos[k * 6 + 3] = x - fx * len; partPos[k * 6 + 4] = y; partPos[k * 6 + 5] = z - fz * len; } partGeo.attributes.position.needsUpdate = true; }
+
+/* ═════════ раскраска и слои ═════════ */
+const ramp = stops => t => { t = Math.max(0, Math.min(1, t)) * (stops.length - 1); const i = Math.min(stops.length - 2, Math.floor(t)), f = t - i, a = stops[i], b = stops[i + 1]; return [a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f, a[2] + (b[2] - a[2]) * f]; };
+const hex = h => [(h >> 16 & 255) / 255, (h >> 8 & 255) / 255, (h & 255) / 255], RP = [0x25324d, 0x8a5a1c, 0xf5b544, 0xfff4cf].map(hex), RW = [0x62d6a0, 0xf5b544, 0xf0784a, 0xe5352f].map(hex), R_power = ramp(RP), R_wake = ramp(RW);
+const ST_COL = { 0: 0x62d6a0, 1: 0x8d95a8, 2: 0xb38cff, 3: 0xff5a4a, 4: 0x5b9bea, 5: 0xf5b544, 6: 0xff5a4a, 9: 0x4a443a }, ST_NAME = { 0: 'Работает', 1: 'Ждёт ветра', 2: 'Остановлена: буря', 3: 'Авария', 4: 'Обслуживание', 5: 'Ограничена', 6: 'Отключён фидер', 9: 'Не построена' };
+const STAGE_COL = [0x4a443a, 0xa58a5e, 0xc9bea6, 0xb9c2cf, 0xf5b544, 0x5b9bea, 0x7fd4ff, 0x62d6a0];
+function paintDots() {
+  for (let i = 0; i < N; i++) { let c;
+    if (S.stage === 'build') { const b = bState[i]; c = hex(S.bmode === 'stat' ? STAGE_COL[b.stage] : S.bmode === 'pf' ? (b.late > 45 ? 0xe5352f : b.late > 14 ? 0xf0784a : b.late > 0 ? 0xf5b544 : b.due && b.stage > 0 ? 0x62d6a0 : 0x4a443a) : (qcOpen.has(i) ? (qcOpen.get(i).sev === 'bad' ? 0xe5352f : 0xf5b544) : 0x4a443a)); }
+    else if (S.mode === 'power') c = R_power(pw[i] / T.rated); else if (S.mode === 'wake') c = R_wake(def[i] / 0.22); else if (S.mode === 'elec') { const k = feederCol(W.feeder[i]); c = [k.r, k.g, k.b]; } else c = hex(ST_COL[st[i]]);
+    if (S.sel && S.stage !== 'cost') { const on = S.sel.level === 'wtg' ? S.sel.i === i : S.sel.level === 'feeder' ? W.feeder[i] === S.sel.f : true; if (!on) c = c.map(x => x * .35); else if (S.sel.level !== 'ss') c = c.map(x => Math.min(1, x * 1.25 + .15)); }
+    dotCol.set(c, i * 3); }
+  dotGeo.attributes.color.needsUpdate = true;
+}
+function layers() { if (!trenchG) return; const o = S.stage === 'ops'; trenchG.visible = o && S.mode === 'elec'; feederG.visible = o && S.mode === 'elec'; zoneG.visible = o && S.mode === 'zones'; streaks.visible = S.stage !== 'build' && (S.mode === 'wake' || S.mode === 'real' || S.mode === 'power') && !reduceMotion; cranes.visible = S.stage === 'build'; }
+
+/* ═════════ мелкая графика ═════════ */
+function spark(vals, upto, dots) { const w = 150, h = 38, n = vals.length, mx = Math.max(...vals, 1e-6), pts = vals.map((x, i) => [+(i / (n - 1) * w).toFixed(1), +(h - 3 - x / mx * (h - 8)).toFixed(1)]), cut = Math.max(1, Math.min(n - 1, Math.round(upto * (n - 1)))), line = pts.slice(0, cut + 1).join(' ');
+  return `<svg viewBox="0 0 ${w} ${h}"><polyline points="${pts.join(' ')}" fill="none" stroke="rgba(255,255,255,.22)" ${dots ? 'stroke-width="1.6" stroke-dasharray="0.1 4" stroke-linecap="round"' : 'stroke-width="1"'}/><polygon points="0,${h} ${line} ${pts[cut][0]},${h}" fill="url(#gA)"/><polyline points="${line}" fill="none" stroke="#f5b544" stroke-width="1.6" stroke-linejoin="round"/><circle cx="${pts[cut][0]}" cy="${pts[cut][1]}" r="2.8" fill="#fff"/></svg>`; }
+function gauge(p, text, sub) { p = Math.max(0, Math.min(100, p)); return `<svg class="gauge" viewBox="0 0 100 64"><path d="M10 54A40 40 0 0 1 90 54" fill="none" stroke="rgba(255,255,255,.1)" stroke-width="7" stroke-linecap="round"/><path d="M10 54A40 40 0 0 1 90 54" fill="none" stroke="#f5b544" stroke-width="7" stroke-linecap="round" pathLength="100" stroke-dasharray="${p} 100"/><text x="50" y="49" text-anchor="middle" class="gt">${text}</text>${sub ? `<text x="50" y="61" text-anchor="middle" class="gs">${sub}</text>` : ''}</svg>`; }
+function ring(parts, center, sub) { const tot = parts.reduce((s, p) => s + p[1], 0) || 1; let off = 0; const arcs = parts.map(p => { const len = p[1] / tot * 100, a = `<circle cx="50" cy="50" r="40" fill="none" stroke="${p[2]}" stroke-width="9" pathLength="100" stroke-dasharray="${Math.max(0, len - 1.2)} ${100 - Math.max(0, len - 1.2)}" stroke-dashoffset="${-off}" stroke-linecap="round"/>`; off += len; return a; }).join('');
+  return `<div class="ring"><div class="c"><svg viewBox="0 0 100 100" style="transform:rotate(-90deg);display:block"><circle cx="50" cy="50" r="40" fill="none" stroke="rgba(255,255,255,.07)" stroke-width="9"/>${arcs}</svg><b>${center}</b>${sub ? `<small>${sub}</small>` : ''}</div><ul>${parts.map(p => `<li><span><i style="background:${p[2]}"></i>${p[0]}</span><b>${fmt(p[1] / tot * 100, 1)} %</b></li>`).join('')}</ul></div>`; }
+function rose(dir) { const mx = Math.max(...W.ROSE.map(r => r[1])), bars = W.ROSE.map(([d, f]) => { const r0 = 12, r1 = 12 + f / mx * 62, a0 = (d - 12) * RAD, a1 = (d + 12) * RAD, P = (r, a) => `${(100 + r * Math.sin(a)).toFixed(1)},${(100 - r * Math.cos(a)).toFixed(1)}`;
+    return `<path d="M${P(r0, a0)}L${P(r1, a0)}A${r1} ${r1} 0 0 1 ${P(r1, a1)}L${P(r0, a1)}Z" fill="#f5b544" fill-opacity="${.35 + .65 * f / mx}"/>`; }).join('');
+  return `<svg class="rose" viewBox="0 0 200 200"><circle cx="100" cy="100" r="74" fill="none" stroke="rgba(255,255,255,.12)"/><circle cx="100" cy="100" r="43" fill="none" stroke="rgba(255,255,255,.08)"/>${bars}${['С', 'В', 'Ю', 'З'].map((t, k) => `<text x="${100 + 88 * Math.sin(k * 90 * RAD)}" y="${104 - 88 * Math.cos(k * 90 * RAD)}" text-anchor="middle" style="font:10px var(--body);fill:var(--muted)">${t}</text>`).join('')}${dir != null ? `<line x1="100" y1="100" x2="${100 + 80 * Math.sin(dir * RAD)}" y2="${100 - 80 * Math.cos(dir * RAD)}" stroke="#fff" stroke-width="1.5"/>` : ''}</svg>`; }
+const pwf = kw => kw < 1000 ? fmt(kw) + ' кВт' : fmt(kw / 1000, kw < 1e5 ? 2 : 1) + ' МВт';
+
+/* ═════════ эксплуатация ═════════ */
+function events() {
+  const ev = [];
+  tripped.forEach((t, f) => { if (t) ev.push({ sev: 'bad', key: 'feeder:' + f, title: `Фидер ${f + 1} отключён`, sub: 'Сработала защита от замыкания на землю, 33 кВ', sel: { level: 'feeder', f }, loss: W.feeders[f].reduce((s, i) => s + pExp[i], 0), fix: () => tripped[f] = 0 }); });
+  for (let i = 0; i < N; i++) if (fault[i] && !tripped[W.feeder[i]]) ev.push({ sev: fault[i] === 3 ? 'bad' : 'warn', key: 'wtg:' + i, title: `${wName(i)}: ${fault[i] === 3 ? 'авария' : fault[i] === 4 ? 'обслуживание' : 'ограничение'}`, sub: faultText[i], sel: { level: 'wtg', i }, loss: Math.max(0, pExp[i] - pw[i]), fix: () => { fault[i] = 0; derate[i] = 1; } });
+  return ev.sort((a, b) => b.loss - a.loss);
+}
+const WO = ['Допуск', 'Диагностика', 'Ремонт', 'Проверка']; let evCache = [];
+function createOrder(key) { const e = evCache.find(x => x.key === key); if (!e || S.orders.find(o => o.key === key)) return; S.orders.push({ key, n: 4101 + S.orders.length + S.fixed, crew: (S.orders.length + S.fixed) % 4 + 1, step: 0, fix: e.fix }); refresh(); }
+function advanceOrder(key) { const o = S.orders.find(x => x.key === key); if (!o) return; if (++o.step >= 4) { o.fix(); S.orders = S.orders.filter(x => x !== o); S.fixed++; if (S.sel && selKey(S.sel) === key) S.sel = null; buildCurve(); } refresh(); }
+const selKey = s => s.level + ':' + (s.i ?? s.f ?? '');
+function renderOps() {
+  const L = live, k = Math.min(curve.length - 1, Math.round(S.min / 10)), u = S.min / 1440, grid = L.hv / 1000 - bess[k], nRun = st.filter(x => x === 0 || x === 5).length;
+  $('#clock').textContent = hhmm(S.min);
+  $('#r-tiles').innerHTML = `
+    <div class="tile"><label>В сеть 220 кВ</label><div class="v">${fmt(grid, grid < 100 ? 1 : 0)}<small>МВт</small></div><div class="s">${fmt(grid / 10)} % от 1000 МВт</div><div class="viz">${spark(curve, u)}</div></div>
+    <div class="tile"><label>За день</label><div class="v">${fmt(energyUntil(S.min) / 1000, 2)}<small>ГВт·ч</small></div><div class="s">к полуночи ${fmt(eDay / 1000, 2)}</div><div class="viz">${spark(curve.map((x, i) => energyUntil(i * 10)), u)}</div></div>
+    <div class="tile"><label>Ветер на оси</label><div class="v">${fmt(L.w.v, 1)}<small>м/с</small></div><div class="s">${compass(L.w.dir)}, ${fmt(L.w.dir)}°</div><div class="viz">${spark(windC, u, true)}</div></div>
+    <div class="tile"><label>В работе</label>${gauge(nRun / N * 100, String(nRun), 'из ' + N + ' ВЭУ')}</div>`;
+  $('#f-a').textContent = fmt(W.density(hMean + T.hub, L.w.temp), 3) + ' кг/м³'; $('#f-b').textContent = L.free > 1 ? fmt((1 - L.waked / L.free) * 100, 1) + ' %' : '—'; $('#f-c').textContent = `${fmt(soc[k] * 100)} %, ${bess[k] > 1 ? 'заряд ' + fmt(bess[k]) : bess[k] < -1 ? 'выдача ' + fmt(-bess[k]) : '0'} МВт`;
+  const pill = $('#st-pill'); pill.className = 'pill ' + (L.w.v >= T.cutOut ? 'bad' : L.act > 1 ? '' : 'off'); pill.lastElementChild.textContent = L.w.v >= T.cutOut ? 'Буря' : L.act > 1 ? 'В работе' : 'Штиль';
+  const o = W.ohl(Math.max(0, grid * 1000));
+  $('#ss-rows').innerHTML = `<button class="row" data-ss="1"><span class="n">Трансформаторы</span><span class="t">${W.EL.trafos} × ${W.EL.trafoMva} МВА</span><span class="p">${fmt(L.trLoad * 100)} <small>%</small></span><span class="bar"><i style="width:${Math.min(100, L.trLoad * 100)}%"></i></span></button>` +
+    o.lines.map(l => `<div class="row"><span class="n">${l.name.replace('ВЛ 220 кВ ', '')}</span><span class="t">${l.km} км</span><span class="p">${fmt(l.mw)} <small>МВт</small></span><span class="bar"><i style="width:${Math.min(100, l.mw / 4)}%"></i></span></div>`).join('') +
+    `<div class="row"><span class="n">Накопитель</span><span class="t">${W.EL.bessMwh} МВт·ч</span><span class="p">${fmt(soc[k] * 100)} <small>%</small></span><span class="bar"><i style="width:${soc[k] * 100}%"></i></span></div>`;
+  evCache = events(); $('#ev-pill').lastElementChild.textContent = evCache.length;
+  $('#ev-rows').innerHTML = (evCache.length ? evCache.map(e => { const od = S.orders.find(x => x.key === e.key);
+    return `<div class="ev ${e.sev}" data-ev="${e.key}"><i class="dot"></i><b>${e.title}</b><em>${e.loss > 1 ? '−' + pwf(e.loss) : ''}</em><span>${e.sub}</span>${od ? `<div class="wo"><small>Наряд ${od.n}, бригада ${od.crew}</small><div class="segs">${WO.map((_, i) => `<i class="${i < od.step ? 'on' : ''}"></i>`).join('')}</div><button class="mini go" data-adv="${e.key}">${WO[od.step]} ✓</button></div>` : `<div class="wo"><small></small><button class="mini" data-new="${e.key}">Создать наряд</button></div>`}</div>`; }).join('') : `<p class="empty">Все ветроустановки и фидеры в работе.</p>`) + (S.fixed ? `<p class="empty" style="margin-top:4px">Устранено за сессию: ${S.fixed}.</p>` : '');
+  const down = Math.max(0, L.waked - L.act), el = L.mv + L.tr;
+  $('#side').innerHTML = `<div class="card-head"><h2>Куда уходит мощность</h2></div>` + (L.free > 50 ? ring([['В сеть', L.hv, '#f5b544'], ['Следы ВЭУ', L.free - L.waked, '#7fb6ff'], ['Простои', down, '#ff6452'], ['Кабели и ПС', el, '#b5367a']], fmt(L.hv / L.free * 100) + ' %', 'в сеть') : `<p class="empty">${L.w.v >= T.cutOut ? 'Ветер сильнее 25 м/с: ветроустановки остановлены и развёрнуты лопастями по потоку.' : 'Ветер слабее 3 м/с: роторы не вращаются.'}</p>`);
+  drawTimeline(); alertLabels();
+}
+function drawTimeline() {
+  const pt = (x, i, P, n) => `${(i / n * 1000).toFixed(1)},${(100 - Math.min(x, P) / P * 94).toFixed(1)}`;
+  if (S.stage === 'ops') { const P = 1050, n = curve.length - 1, d = 'M' + curve.map((x, i) => pt(x, i, P, n)).join('L'), k = Math.floor(S.min / 10), f = curve.slice(0, k + 1).map((x, i) => pt(x, i, P, n)).join('L');
+    $('#c-plan').setAttribute('d', ''); $('#c-fc').setAttribute('d', ''); $('#c-ghost').setAttribute('d', d + 'L1000,100L0,100Z'); $('#c-line').setAttribute('d', 'M' + f); $('#c-area').setAttribute('d', 'M0,100L' + f + `L${(k / n * 1000).toFixed(1)},100Z`);
+    const x = S.min / 1440 * 1000; $('#c-cur').setAttribute('x1', x); $('#c-cur').setAttribute('x2', x); }
+  else if (S.stage === 'build') { const n = E.MAXD, D = Math.round(S.bday), f = E.curveFact.slice(0, D + 1).map((x, i) => pt(x, i, 1, n)).join('L');
+    $('#c-plan').setAttribute('d', 'M' + E.curvePlan.map((x, i) => pt(x, i, 1, n)).join('L')); $('#c-ghost').setAttribute('d', ''); $('#c-line').setAttribute('d', 'M' + f); $('#c-area').setAttribute('d', 'M0,100L' + f + `L${(D / n * 1000).toFixed(1)},100Z`);
+    $('#c-fc').setAttribute('d', bm.ev < .9995 ? `M${pt(bm.ev, D, 1, n)}L${pt(1, Math.min(n, bm.forecast), 1, n)}` : ''); const x = D / n * 1000; $('#c-cur').setAttribute('x1', x); $('#c-cur').setAttribute('x2', x); }
+}
+
+/* ═════════ стройка ═════════ */
+let bm = E.metrics(S.bday), bState = [], qcOpen = new Map();
+function applyBuild() {
+  bm = E.metrics(S.bday); qcOpen = new Map(); bm.open.forEach(q => { if (!qcOpen.has(q.i) || q.sev === 'bad') qcOpen.set(q.i, q); }); bState = [];
+  for (let i = 0; i < N; i++) { const b = E.wtgState(i, S.bday); bState.push(b); towerK[i] = b.tower; nacOn[i] = +b.nacelle; bladeN[i] = b.blades; foundK[i] = b.found; padOn[i] = +b.pad; built[i] = +b.com; }
+  bm.cranes.slice(0, 4).forEach((i, k) => { dm.rotation.set(0, 0, 0.12); dm.scale.set(1, 1, 1); dm.position.set(W.X[i] + Math.sin(padDir[i]) * 30, baseY[i], W.Z[i] + Math.cos(padDir[i]) * 30); dm.updateMatrix(); cranes.setMatrixAt(k, dm.matrix); });
+  for (let k = Math.min(4, bm.cranes.length); k < 4; k++) cranes.setMatrixAt(k, ZERO); cranes.instanceMatrix.needsUpdate = true; dm.rotation.set(0, 0, 0);
+}
+function applyBuilt() { towerK.fill(1); nacOn.fill(1); bladeN.fill(3); foundK.fill(1); padOn.fill(1); built.fill(1); }
+function buildAlerts(m) {
+  const a = [], er = m.acts.find(x => x.id === 'erect');
+  if (m.stopped) a.push(['bad', 'Монтаж ВЭУ остановлен', `${m.stopWhy}. Простой до ${fdate(E.dateOf(m.stopped[1]))}`]);
+  if (m.winter && !m.acts.find(x => x.id === 'found').done) a.push(['warn', 'Бетонирование фундаментов на зимней паузе', `Возобновится ${fdate(E.dateOf(m.winter[1]))}`]);
+  const ms = m.ms.find(x => m.d >= x.day - 60 && m.mw < x.mw - 4); if (ms) a.push([m.d > ms.day ? 'bad' : 'warn', `Веха ${ms.mw} МВт ${m.d > ms.day ? 'сорвана' : 'под угрозой'}`, `По RFP ${fdate(E.dateOf(ms.day))} (${ms.tag}), по ходу работ ${ms.fact > 0 ? fdate(E.dateOf(ms.fact)) : 'не достигается'}; в сети ${fmt(m.mw)} МВт`]);
+  if (er.started && !er.done && !m.stopped && m.stock <= 4) a.push(['warn', `На площадке ${m.stock} комплектов ВЭУ`, 'Запаса хватит меньше чем на две недели монтажа']);
+  m.acts.filter(x => x.over).forEach(x => a.push(['bad', `${x.name}: срок вышел`, `Осталось ${fmt(x.qty - x.fact, x.qty > 200 ? 0 : 1)} ${x.unit}`]));
+  if (m.ev >= .9995) a.push(['ok', 'Все ВЭУ в сети', `Факт ${fdate(E.dateOf(E.factEnd))}, по RFP ${fdate(E.dateOf(E.PD))}; приёмка ${fdate(E.dateOf(E.PAC))}`]);
+  return a;
+}
+function renderBuild() {
+  const m = bm, D = S.bday; $('#clock').textContent = fdate(E.dateOf(D));
+  $('#r-tiles').innerHTML = `
+    <div class="tile"><label>Готовность</label>${gauge(m.ev * 100, fmt(m.ev * 100, 1) + ' %', 'план ' + fmt(m.pv * 100, 1) + ' %')}</div>
+    <div class="tile"><label>В сети</label><div class="v">${fmt(m.mw)}<small>МВт</small></div><div class="s">по вехам RFP ${fmt(m.mwPlan)}</div><div class="viz">${spark(E.mwFact.slice(0, 800), D / 799)}</div></div>
+    <div class="tile"><label>Темп к плану</label><div class="v">${fmt(m.spi, 2)}</div><div class="s">${m.spi >= .995 ? 'по графику' : fmt(m.spi * 100) + ' % от плана'}</div></div>
+    <div class="tile"><label>1000 МВт</label><div class="v" style="font-size:14px;letter-spacing:0">${fdate(E.dateOf(m.ev >= .9995 ? E.factEnd : m.forecast))}</div><div class="s">по RFP ${fdate(E.dateOf(E.PD))}</div></div>`;
+  $('#b-acts').innerHTML = m.acts.map(a => { const pf = a.fact / a.qty * 100, pp = a.plan / a.qty * 100, dg = a.qty < 200 || a.unit === 'км' ? (a.unit === 'шт' ? 0 : a.qty < 200 ? 0 : 0) : 0, note = a.done ? ['ok', 'готово'] : a.over ? ['bad', 'срок вышел'] : !a.started ? ['', 'ещё не начато'] : ['', `идёт ${fmt(a.rate, 1)} в день, нужно ${fmt(a.need, 1)}`];
+    return `<div class="row w"><span class="n">${a.name}</span><span class="p">${fmt(a.fact, dg)} <small>из ${fmt(a.qty)} ${a.unit}</small></span><span class="bar"><i style="width:${pf}%"></i>${pp > 0 && pp < 100 ? `<u style="left:${pp}%"></u>` : ''}</span><span class="note ${note[0]}">${note[1]}</span></div>`; }).join('');
+  const al = buildAlerts(m); $('#b-pill').className = 'pill ' + (al.some(x => x[0] === 'bad') ? 'bad' : al.some(x => x[0] === 'warn') ? 'warn' : ''); $('#b-pill').lastElementChild.textContent = al.filter(x => x[0] !== 'ok').length;
+  $('#b-alerts').innerHTML = al.length ? al.map(x => `<div class="ev ${x[0]}"><i class="dot"></i><b>${x[1]}</b><em></em><span>${x[2]}</span></div>`).join('') : `<p class="empty">На эту дату нет отклонений, которые требуют решения.</p>`;
+  $('#b-qcpill').lastElementChild.textContent = m.open.length;
+  $('#b-qc').innerHTML = m.open.length ? m.open.slice(-6).reverse().map(q => `<div class="ev ${q.sev}" data-w="${q.i}"><i class="dot"></i><b>${wName(q.i)}</b><em>${fmt(D - q.found)} дн.</em><span>${q.text}</span></div>`).join('') : `<p class="empty">Открытых замечаний нет.</p>`;
+  $('#side').innerHTML = `<div class="card-head"><h2>Комплекты ВЭУ</h2><span class="pill ${m.stopped ? 'warn' : 'off'}"><i></i><span>${m.erected >= N ? 'смонтированы' : m.stopped ? 'монтаж стоит' : 'на площадке ' + m.stock}</span></span></div>` + ring([['Смонтировано', m.erected, '#f5b544'], ['Ждут монтажа', m.stock, '#7fb6ff'], ['Не привезено', N - m.del, 'rgba(255,255,255,.18)']], m.erected + '', 'из ' + N);
+  drawTimeline(); alertLabels();
+}
+
+/* ═════════ смета и экономика ═════════ */
+function renderCost() {
+  const p = Object.assign({}, E.ECON, S.econ), a = W.aep(p.avail / 100), f = E.finance(p, a.net);
+  $('#clock').textContent = 'Оценка проекта';
+  $('#r-tiles').innerHTML = `
+    <div class="tile"><label>Выработка в год</label><div class="v">${fmt(a.net / 1000, 2)}<small>ТВт·ч</small></div><div class="s">КИУМ ${fmt(a.cf * 100, 1)} %</div></div>
+    <div class="tile"><label>Выручка в год</label><div class="v">${fmt(f.rev / 1e6)}<small>млн $</small></div><div class="s">тариф ${fmt(p.tariff, 2)} цента</div></div>
+    <div class="tile"><label>LCOE</label><div class="v">${fmt(f.lcoe, 2)}<small>цента</small></div><div class="s">${fmt(f.perKw)} $ за кВт</div></div>
+    <div class="tile"><label>Окупаемость</label><div class="v">${f.payback ? fmt(f.payback, 1) : '—'}<small>${f.payback ? 'лет' : ''}</small></div><div class="s">${f.irr != null ? 'IRR ' + fmt(f.irr * 100, 1) + ' %' : 'не окупается'}</div></div>`;
+  const sg = x => (x > 0 ? '+' : '−') + fmt(Math.abs(x)); $('#c-aep').tBodies[0].innerHTML = a.steps.map((s, i) => `<tr><td>${s[0]}</td><td>${i ? sg(s[1]) : fmt(s[1])}${i ? ` <span style="color:var(--faint)">${fmt(Math.abs(s[1]) / a.gross * 100, 1)} %</span>` : ''}</td></tr>`).join('') + `<tr><td><b>В сеть, ГВт·ч в год</b></td><td><b>${fmt(a.net)}</b></td></tr>`;
+  $('#side').innerHTML = `<div class="card-head"><h2>Роза ветров</h2><span class="pill off"><span>допущение</span></span></div>${rose(null)}`;
+  const mx = Math.max(...a.sect.map(s => s.net)); $('#bars').innerHTML = `<span class="cap">Выработка по направлениям ветра, ГВт·ч в год. Средняя скорость на оси ${fmt(W.ROSE.reduce((s, r) => s + r[1] * r[2] * 0.886, 0), 1)} м/с, потери в следах ${fmt((1 - a.waked / a.gross) * 100, 1)} %</span>` + a.sect.map(s => `<div class="${s.net === mx ? 'hi' : ''}"><b>${fmt(s.net)}</b><i style="height:${(s.net / mx * 56).toFixed(0)}px"></i>${compass(s.dir)}</div>`).join('');
+  alertLabels();
+}
+const FIELDS = [['capex', 'Стоимость проекта, млн $'], ['tariff', 'Тариф, центов за кВт·ч'], ['opex', 'Эксплуатация, % в год'], ['rate', 'Ставка дисконта, %'], ['years', 'Срок, лет'], ['avail', 'Готовность ВЭУ, %']];
+
+/* ═════════ правая колонка, режимы ═════════ */
+const RIGHT = {
+  ops: `<section class="card glass"><div class="card-head"><h2>Станция сейчас</h2><span class="pill" id="st-pill"><i></i><span>В работе</span></span></div><div class="tiles" id="r-tiles"></div>
+      <dl class="kv sep"><dt>Плотность воздуха</dt><dd id="f-a"></dd><dt>Потери в следах</dt><dd id="f-b"></dd><dt>Накопитель</dt><dd id="f-c"></dd></dl></section>
+    <section class="card glass"><div class="card-head"><h2>Подстанция и линии</h2><span class="pill off"><span>220/33 кВ</span></span></div><div class="rows" id="ss-rows"></div></section>
+    <section class="card glass"><div class="card-head"><h2>Что теряет мощность</h2><span class="pill warn" id="ev-pill"><i></i><span>0</span></span></div><div class="rows" id="ev-rows"></div></section><p class="foot" id="src"></p>`,
+  build: `<section class="card glass"><div class="card-head"><h2>Стройка на дату</h2><span class="pill off"><span>NTP июль 2026</span></span></div><div class="tiles" id="r-tiles"></div></section>
+    <section class="card glass"><div class="card-head"><h2>Требует решения</h2><span class="pill" id="b-pill"><i></i><span>0</span></span></div><div class="rows" id="b-alerts"></div></section>
+    <section class="card glass"><div class="card-head"><h2>Объёмы работ</h2><span class="pill off"><span>метка — план</span></span></div><div class="rows" id="b-acts"></div></section>
+    <section class="card glass"><div class="card-head"><h2>Замечания ОТК</h2><span class="pill warn" id="b-qcpill"><i></i><span>0</span></span></div><div class="rows" id="b-qc"></div></section><p class="foot" id="src"></p>`,
+  cost: `<section class="card glass"><div class="card-head"><h2>Экономика проекта</h2><span class="pill off"><span>1000 МВт</span></span></div><div class="tiles" id="r-tiles"></div></section>
+    <section class="card glass"><div class="card-head"><h2>Допущения</h2><button class="mini" id="fin-reset">Сбросить</button></div><div class="fin" id="c-fin"></div></section>
+    <section class="card glass"><div class="card-head"><h2>Выработка, ГВт·ч в год</h2></div><table class="boq" id="c-aep"><tbody></tbody></table></section>
+    <section class="card glass"><div class="card-head"><h2>Ведомость объёмов</h2><span class="pill off"><span>BOP</span></span></div><table class="boq"><tbody>${E.BOQ.map(r => `<tr><td>${r[0]}</td><td>${fmt(r[1], r[1] % 1 ? (r[1] < 20 ? 2 : 1) : 0)} ${r[2]}</td></tr>`).join('')}</tbody></table></section><p class="foot" id="src"></p>`
+};
+const MODES = { ops: [['real', 'Вид'], ['power', 'Мощность'], ['wake', 'Следы'], ['elec', 'Сеть 33 кВ'], ['zones', 'Ограничения']], build: [['stat', 'Ход работ'], ['pf', 'План и факт'], ['qc', 'Замечания']], cost: [] };
+const VIEWS = { ops: [[-6500, 4000, 13500], [-300, 0, 1500]], build: [[-9000, 9000, 15500], [0, 0, 500]], cost: [[-2000, 26000, 21000], [0, 0, 500]] };
+function setSrc() { const el = $('#src'); if (!el) return; const map = S.terrain && S.terrain.demOk ? 'Рельеф — открытые данные высот (Terrain Tiles), снимок — Esri World Imagery.' : 'Рельеф условный.';
+  el.textContent = (S.stage === 'ops' ? 'Координаты ВЭУ, дороги и кабельные траншеи взяты из KMZ проекта. Ветер, модель ВЭУ и отказы — расчётные допущения, это не данные SCADA. ' : S.stage === 'build' ? 'План привязан к вехам RFP, объёмы — из ведомости BOP. Фактический ход работ — демонстрационный сценарий. ' : 'Стоимость и тариф — из справки по проекту. Роза ветров и модель ВЭУ — допущения: ветрового отчёта в папке нет. ') + map; }
+function setStage(s, fly = true) {
+  S.stage = s; S.sel = null; S.playing = false; $('#play-ic').setAttribute('d', 'M4 2.5v11l9-5.5z');
+  $$('#tabs button').forEach(b => b.setAttribute('aria-pressed', b.dataset.stage === s)); $('#right').innerHTML = RIGHT[s];
+  $('#modes').innerHTML = MODES[s].map(m => `<button data-mode="${m[0]}" aria-pressed="${m[0] === (s === 'ops' ? S.mode : S.bmode)}">${m[1]}</button>`).join('');
+  $('#clockbox').innerHTML = `<span class="num" id="clock"></span>` + (s === 'ops' ? `<select id="daysel" aria-label="Погода">${Object.entries(W.DAYS).map(([k, d]) => `<option value="${k}">${d[0]}</option>`).join('')}</select>` : '');
+  if (s === 'ops') { const sel = $('#daysel'); sel.value = S.day; sel.onchange = e => { S.day = e.target.value; buildCurve(); refresh(); }; }
+  const tl = s !== 'cost'; for (const q of ['#tl-ctl', '#tl-chart', '#axis']) $(q).hidden = !tl; $('#bars').hidden = tl; const t = $('#t');
+  if (s === 'ops') { t.min = 0; t.max = 1435; t.step = 5; t.value = S.min; $('#now').textContent = 'Полдень'; $('#cap').innerHTML = 'Выдача в сеть за сутки, до 1000 МВт'; $('#axis').innerHTML = ['00:00', '06:00', '12:00', '18:00', '24:00'].map((x, i) => `<span style="left:${i * 25}%">${x}</span>`).join(''); }
+  if (s === 'build') { t.min = 0; t.max = E.MAXD; t.step = 1; t.value = S.bday; $('#now').textContent = 'Финиш'; $('#cap').innerHTML = '<span><i></i>план</span><span><i style="background:#f5b544"></i>факт и прогноз</span>';
+    const st = $('#tl-chart').clientWidth < 520 ? 200 : 100; let h = ''; for (let d = 0; d <= E.MAXD - (st > 100 ? 100 : 0); d += st) h += `<span style="left:${d / E.MAXD * 100}%">${E.dateOf(d).toLocaleDateString('ru-RU', { month: 'short', year: '2-digit', timeZone: 'UTC' }).replace(' г.', '').replace('.', '')}</span>`; $('#axis').innerHTML = h; }
+  if (s === 'cost') $('#c-fin').innerHTML = FIELDS.map(([k, l]) => `<label>${l}<input type="number" step="any" data-k="${k}" value="${S.econ[k] ?? E.ECON[k]}"></label>`).join('');
+  if (s !== 'build') { applyBuilt(); buildCurve(); } setSrc(); refresh(); if (fly) flyView(...VIEWS[s]);
+}
+function refresh() {
+  if (S.stage === 'build') { applyBuild(); live = { ...compute(720), night: false }; applySun(690); }
+  else { live = { ...live, ...compute(S.stage === 'cost' ? 780 : S.min) }; applySun(S.stage === 'cost' ? 780 : S.min); }
+  yaw = Math.atan2(Math.sin(live.w.dir * RAD), -Math.cos(live.w.dir * RAD)); poseStatic(); paintDots(); layers();
+  S.stage === 'ops' ? renderOps() : S.stage === 'build' ? renderBuild() : renderCost(); renderInspector(); renderLegend(); markSel(); insets();
+}
+$('#tabs').addEventListener('click', e => { const b = e.target.closest('button'); if (b && b.dataset.stage !== S.stage) setStage(b.dataset.stage); });
+$('#modes').addEventListener('click', e => { const b = e.target.closest('button'); if (!b) return; S.stage === 'ops' ? S.mode = b.dataset.mode : S.bmode = b.dataset.mode; $$('#modes button').forEach(x => x.setAttribute('aria-pressed', x === b)); refresh(); });
+$('#right').addEventListener('click', e => {
+  const nw = e.target.closest('[data-new]'), adv = e.target.closest('[data-adv]'), ev = e.target.closest('[data-ev]'), ww = e.target.closest('[data-w]'), ss = e.target.closest('[data-ss]');
+  if (nw) return createOrder(nw.dataset.new); if (adv) return advanceOrder(adv.dataset.adv);
+  if (ev) { const x = evCache.find(q => q.key === ev.dataset.ev); if (x) select(x.sel, true); return; }
+  if (ww) return select({ level: 'wtg', i: +ww.dataset.w }, true); if (ss) return select({ level: 'ss' }, true);
+  if (e.target.id === 'fin-reset') { S.econ = {}; setStage('cost', false); }
+});
+$('#right').addEventListener('input', e => { const i = e.target.closest('input[data-k]'); if (!i) return; const x = parseFloat(i.value); if (Number.isFinite(x)) { S.econ[i.dataset.k] = x; renderCost(); } });
+
+/* ═════════ карточка объекта ═════════ */
+const X_BTN = '<button class="x" data-act="clear" aria-label="Закрыть"><svg width="10" height="10" viewBox="0 0 10 10" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M1 1l8 8M9 1 1 9"/></svg></button>';
+function renderInspector() {
+  const el = $('#insp'), s = S.sel; if (S.stage === 'cost' || !s) { el.style.display = 'none'; return; } el.style.display = '';
+  const kv = rows => `<dl class="kv">${rows.map(r => `<dt>${r[0]}</dt><dd class="${r[2] || ''}">${r[1]}</dd>`).join('')}</dl>`;
+  if (s.level === 'ss') { const c = W.collect(pw, tripped), o = W.ohl(c.hv);
+    el.innerHTML = `<div class="card-head"><span class="pill"><i></i><span>В работе</span></span>${X_BTN}</div><h3 class="insp-title">Подстанция 220/33 кВ</h3><div class="insp-sub">Точка учёта на стороне 220 кВ</div><div class="big"><b>${pwf(c.hv)}</b><span>на шинах 220 кВ</span></div>` +
+      kv([['Фидеров 33 кВ в работе', `${W.NF - tripped.reduce((a, b) => a + b, 0)} из ${W.NF}`], ['Загрузка трансформаторов', fmt(c.trLoad * 100) + ' %'], ['Потери в кабелях 33 кВ', pwf(c.mvLoss)], ['Потери в трансформаторах', pwf(c.trLoss)], ['Потери в ВЛ за точкой учёта', pwf(o.loss)], ['Накопитель', `${W.EL.bessMw} МВт, ${W.EL.bessMwh} МВт·ч`]]) + `<div class="insp-actions"><button class="btn" data-act="fly">Показать в сцене</button></div>`; return; }
+  if (S.stage === 'build') { const i = s.i, b = bState[i], D = S.bday, obs = bm.open.filter(q => q.i === i);
+    el.innerHTML = `<div class="card-head"><span class="pill ${b.late > 14 ? 'bad' : b.late > 0 ? 'warn' : ''}"><i></i><span>${b.late > 0 ? 'отстаёт на ' + fmt(b.late) + ' дн.' : 'по графику'}</span></span>${X_BTN}</div><h3 class="insp-title">${wName(i)}</h3><div class="insp-sub">${E.STAGE[b.stage]}. Фидер ${W.feeder[i] + 1}</div>
+      <div class="steps" style="border:0;padding:0;margin:0">${E.steps(i).map(x => { const done = D >= x.fact, now = !done && D >= x.start, late = Math.round((done ? x.fact : D) - x.plan);
+        return `<div class="step ${done ? 'done' : now ? 'now' : ''}"><i></i><span>${x.name}</span><em>${done ? fdate(E.dateOf(x.fact)) : now ? 'в работе' : 'план ' + fdate(E.dateOf(x.plan))}</em>${late > 0 && (done || D > x.plan) ? `<small class="bad">${done ? 'сдано на' : 'просрочено на'} ${fmt(late)} дн. позже плана</small>` : done ? `<small>в срок</small>` : ''}</div>`; }).join('')}</div>
+      ${obs.length ? `<div class="rows" style="margin-top:12px">${obs.map(q => `<div class="ev ${q.sev}"><i class="dot"></i><b>Замечание ${q.n}</b><em>${fmt(D - q.found)} дн.</em><span>${q.text}</span></div>`).join('')}</div>` : ''}<div class="insp-actions"><button class="btn" data-act="fly">Показать в сцене</button></div>`; return; }
+  const seg = `<div class="seg">${[['wtg', 'Ветроустановка'], ['feeder', 'Фидер 33 кВ']].map(l => `<button data-level="${l[0]}" aria-pressed="${s.level === l[0]}">${l[1]}</button>`).join('')}</div>`, key = selKey(s), ev = evCache.find(x => x.key === key), od = S.orders.find(o => o.key === key);
+  const act = `<div class="insp-actions">${ev ? (od ? `<button class="btn go" data-adv="${key}">Наряд ${od.n}: ${WO[od.step].toLowerCase()} ✓</button>` : `<button class="btn go" data-new="${key}">Создать наряд бригаде</button>`) : ''}<button class="btn" data-act="fly">Показать в сцене</button></div>`;
+  if (s.level === 'wtg') { const i = s.i, dv = pExp[i] > 1 ? (pw[i] / pExp[i] - 1) * 100 : NaN;
+    el.innerHTML = `<div class="card-head"><span class="pill ${st[i] === 3 || st[i] === 6 ? 'bad' : st[i] ? 'warn' : ''}"><i></i><span>${ST_NAME[st[i]]}</span></span>${X_BTN}</div>${seg}<h3 class="insp-title">${wName(i)}</h3><div class="insp-sub">${fmt(T.rated / 1000, 2)} МВт, ротор ${T.D} м, ось ${T.hub} м. ${faultText[i] && st[i] ? faultText[i] : 'Фидер ' + (W.feeder[i] + 1)}</div>
+      <div class="big"><b>${pwf(pw[i])}</b>${Number.isNaN(dv) ? '' : `<span class="${dv < -15 ? 'bad' : dv < -3 ? 'warn' : 'ok'}">${dv < -0.5 ? '↓ ' + fmt(-dv) + ' % к расчёту' : 'в норме'}</span>`}</div>` +
+      kv([['Ветер на роторе', fmt(v[i], 1) + ' м/с'], ['Потеря скорости в следе', fmt(def[i] * 100, 1) + ' %', def[i] > .12 ? 'bad' : ''], ['Обороты ротора', fmt(rpm[i] < 1 ? 0 : rpm[i], 1) + ' об/мин'], ['Угол лопастей', fmt(run[i] ? W.pitch(v[i], rho[i]) : 88) + '°'], ['Курс гондолы', `${compass(live.w.dir)}, ${fmt(live.w.dir)}°`], ['Высота площадки', fmt(W.elev[i]) + ' м'], ['Кабель до подстанции', fmt(W.route[i] / 1000, 1) + ' км']]) + act; return; }
+  const f = s.f, m = W.feeders[f], p = m.reduce((a, i) => a + pw[i], 0), I = p / (Math.sqrt(3) * W.EL.kv * W.EL.cosphi);
+  el.innerHTML = `<div class="card-head"><span class="pill ${tripped[f] ? 'bad' : ''}"><i></i><span>${tripped[f] ? 'Отключён' : 'В работе'}</span></span>${X_BTN}</div>${seg}<h3 class="insp-title">Фидер ${f + 1}</h3><div class="insp-sub">33 кВ, ${m.length} ВЭУ: ${m.map(wName).join(', ').replace(/WTG/g, '')}</div><div class="big"><b>${pwf(p)}</b><span>из ${fmt(m.length * T.rated / 1000, 1)} МВт</span></div>` +
+    kv([['Ток в головном кабеле', fmt(I) + ' А'], ['Сечения кабеля', m.map((_, k) => W.section(k + 1)).filter((x, k, a) => a.indexOf(x) === k).join(', ') + ' мм²'], ['Длина трассы', fmt(Math.max(...m.map(i => W.route[i])) / 1000, 1) + ' км'], ['На шинах подстанции', pwf(live.fP ? live.fP[f] : 0)]]) + act;
+}
+$('#insp').addEventListener('click', e => { const act = e.target.closest('[data-act]'), lv = e.target.closest('[data-level]'), nw = e.target.closest('[data-new]'), adv = e.target.closest('[data-adv]');
+  if (nw) return createOrder(nw.dataset.new); if (adv) return advanceOrder(adv.dataset.adv);
+  if (lv) { const s = S.sel; if (lv.dataset.level === 'feeder' && s.level === 'wtg') return select({ level: 'feeder', f: W.feeder[s.i] }); if (lv.dataset.level === 'wtg' && s.level === 'feeder') return select({ level: 'wtg', i: W.feeders[s.f][0] }); return; }
+  if (act) act.dataset.act === 'fly' ? flyToSel() : select(null); });
+function selCenter(s) { if (s.level === 'ss') return { p: new THREE.Vector3(SITE.ss[0] + 40, ssY + 10, SITE.ss[1]), r: 330 }; if (s.level === 'wtg') return { p: new THREE.Vector3(W.X[s.i], baseY[s.i] + 90, W.Z[s.i]), r: 420 };
+  const m = W.feeders[s.f]; let x = 0, z = 0; m.forEach(i => { x += W.X[i]; z += W.Z[i]; }); x /= m.length; z /= m.length; return { p: new THREE.Vector3(x, ground(x, z) + 60, z), r: 1800 }; }
+function markSel() { const s = S.sel; Object.values(labels).forEach(l => l.el.classList.toggle('sel', !!s && l.key === selKey(s))); }
+function select(s, fly) { S.sel = s; paintDots(); renderInspector(); renderLegend(); markSel(); insets(); if (s && fly) flyToSel(); }
+let tween = null;
+function flyView(pos, tgt, ms = 1700) { const p = new THREE.Vector3(...pos), a = new THREE.Vector3(...tgt); a.y += ground(a.x, a.z); p.y += ground(a.x, a.z); if (reduceMotion) { camera.position.copy(p); controls.target.copy(a); return; } tween = { t0: performance.now(), ms, p0: camera.position.clone(), p1: p, a0: controls.target.clone(), a1: a }; }
+function flyToSel() { if (!S.sel) return; const { p, r } = selCenter(S.sel), dir = camera.position.clone().sub(controls.target).normalize(); if (dir.y < .3) { dir.y = .3; dir.normalize(); } const to = p.clone().add(dir.multiplyScalar(r * 2.2)); tween = reduceMotion ? null : { t0: performance.now(), ms: 1200, p0: camera.position.clone(), p1: to, a0: controls.target.clone(), a1: p }; if (reduceMotion) { camera.position.copy(to); controls.target.copy(p); } }
+
+/* ═════════ подписи, легенда ═════════ */
+const labels = {}, labelsEl = $('#labels'), v3 = new THREE.Vector3();
+function addLabel(id, pos, html, cls, onclick, key) { const d = document.createElement('div'); d.className = 'lbl ' + (cls || ''); d.innerHTML = html; d.onclick = onclick; labelsEl.appendChild(d); labels[id] = { el: d, p: pos, key }; }
+addLabel('ss', new THREE.Vector3(SITE.ss[0], 40, SITE.ss[1]), `<i></i><b>ПС 220/33 кВ</b><span></span>`, '', () => select({ level: 'ss' }, true), 'ss:');
+function alertLabels() {
+  Object.keys(labels).filter(k => k[0] === 'a').forEach(k => { labels[k].el.remove(); delete labels[k]; });
+  const top = i => new THREE.Vector3(W.X[i], baseY[i] + T.hub + 40, W.Z[i]);
+  if (S.stage === 'ops') { evCache.slice(0, PHONE ? 2 : 5).forEach((e, k) => { const i = e.sel.level === 'wtg' ? e.sel.i : W.feeders[e.sel.f][0]; addLabel('a' + k, top(i), `<i></i><b>${e.sel.level === 'wtg' ? wName(i) : 'Фидер ' + (e.sel.f + 1)}</b><span>${e.loss > 1 ? '−' + pwf(e.loss) : ''}</span>`, 'alert', () => select(e.sel, true), e.key); });
+    labels.ss.el.querySelector('span').textContent = pwf(live.hv); }
+  if (S.stage === 'build') { bm.cranes.slice(0, 3).forEach((i, k) => addLabel('a' + k, top(i), `<i></i><b>Кран</b><span>${wName(i)}</span>`, 'alert', () => select({ level: 'wtg', i }, true), 'wtg:' + i)); labels.ss.el.querySelector('span').textContent = fmt(bm.acts.find(a => a.id === 'ss').fact) + ' %';
+    if (S.bmode === 'qc') bm.open.slice(-6).forEach((q, k) => addLabel('aq' + k, top(q.i), `<i></i><b>${wName(q.i)}</b>`, 'alert', () => select({ level: 'wtg', i: q.i }, true), 'wtg:' + q.i)); }
+  if (S.stage === 'cost') labels.ss.el.querySelector('span').textContent = '';
+}
+const INS = { l: 0, r: 0, t: 0, b: 0, block: [] };
+function insets() { const w = canvas.clientWidth, h = canvas.clientHeight;
+  if (innerWidth <= 760) { INS.l = -30; INS.r = -30; INS.t = $('#top').getBoundingClientRect().bottom - 10; INS.b = $('#modes').offsetHeight ? 58 : 8; INS.block = []; const cy = (INS.t + h - INS.b) / 2; camera.setViewOffset(w, h, 0, Math.round(h / 2 - cy), w, h); return; }
+  INS.r = w - $('#right').getBoundingClientRect().left + 4; INS.b = h - $('#bot').getBoundingClientRect().top + 4; INS.t = $('#top').getBoundingClientRect().bottom + 4; INS.l = 8; INS.block = ['#modes', '#legend', '#insp'].map(q => $(q).getBoundingClientRect()).filter(r => r.width > 0);
+  const cx = (INS.l + w - INS.r) / 2, cy = (INS.t + h - INS.b) / 2; camera.setViewOffset(w, h, Math.round(w / 2 - cx), Math.round(h / 2 - cy), w, h); }
+function placeLabels() { const w = canvas.clientWidth, h = canvas.clientHeight; for (const l of Object.values(labels)) { v3.copy(l.p).project(camera); const x = (v3.x * .5 + .5) * w, y = (-v3.y * .5 + .5) * h, vis = v3.z < 1 && x > INS.l + 40 && x < w - INS.r - 40 && y > INS.t + 34 && y < h - INS.b - 6 && !INS.block.some(r => x > r.left - 70 && x < r.right + 70 && y > r.top - 4 && y < r.bottom + 34);
+    l.el.style.display = vis ? '' : 'none'; if (vis) l.el.style.transform = `translate(${x.toFixed(1)}px,${y.toFixed(1)}px) translate(-50%,-150%)`; } }
+function renderLegend() {
+  const css = s => `linear-gradient(90deg,${s.map(c => `rgb(${c.map(x => Math.round(x * 255)).join(',')})`).join(',')})`, el = $('#legend'), key = a => `<div class="keys">${a.map(x => `<span><i style="background:#${x[0].toString(16).padStart(6, '0')}"></i>${x[1]}</span>`).join('')}</div>`; let h = '';
+  if (S.stage === 'ops') { if (S.mode === 'power') h = `<h2>Мощность ветроустановки</h2><div class="ramp" style="background:${css(RP)}"></div><div class="ticks"><span>0</span><span>3,6</span><span>7,15 МВт</span></div>`;
+    if (S.mode === 'wake') h = `<h2>Потеря скорости ветра в следе</h2><div class="ramp" style="background:${css(RW)}"></div><div class="ticks"><span>0</span><span>11 %</span><span>22 %</span></div>`;
+    if (S.mode === 'elec') h = `<h2>Кабельные траншеи 33 кВ</h2>` + key(Object.keys(TR_COL).map(k => [TR_COL[k], TR_NAME[k]])) + `<p class="note">Цвет точки и линии над ВЭУ — фидер. Разбивка на 28 фидеров расчётная.</p>`;
+    if (S.mode === 'zones') h = `<h2>Зоны ограничений</h2>` + key([[0xc77dff, 'археология, охранные зоны'], [0x4ade80, 'чувствительная природа'], [0xff5a4a, 'сибиреязвенные захоронения, 1 км']]); }
+  if (S.stage === 'build') h = S.bmode === 'stat' ? `<h2>Что сделано по ветроустановке</h2>` + key(STAGE_COL.map((c, i) => [c, E.STAGE[i]]).slice(1)) : S.bmode === 'pf' ? `<h2>Отставание от плана</h2>` + key([[0x62d6a0, 'в срок'], [0xf5b544, 'до двух недель'], [0xf0784a, 'до полутора месяцев'], [0xe5352f, 'больше']]) : `<h2>Открытые замечания ОТК</h2>` + key([[0xf5b544, 'есть замечание'], [0xe5352f, 'критичное']]);
+  const isHint = !h && !S.sel && S.stage === 'ops'; if (isHint) h = `<p class="empty" style="font-size:12px">${S.stage === 'ops' ? 'Нажмите на ветроустановку или подстанцию. Слои слева показывают мощность, следы, кабельную сеть и зоны ограничений.' : ''}</p>`;
+  el.classList.toggle('hint', isHint); el.innerHTML = h; el.style.display = h ? '' : 'none';
+}
+
+/* ═════════ время, поиск, указатель ═════════ */
+$('#t').addEventListener('input', e => { if (S.stage === 'ops') S.min = +e.target.value; else S.bday = +e.target.value; refresh(); });
+$('#play').addEventListener('click', () => { S.playing = !S.playing; $('#play-ic').setAttribute('d', S.playing ? 'M4 2.5h3v11H4zM9 2.5h3v11H9z' : 'M4 2.5v11l9-5.5z'); if (S.playing && S.stage === 'build' && S.bday >= E.factEnd + 20) S.bday = 0; });
+$('#now').addEventListener('click', () => { if (S.stage === 'ops') S.min = 720; else S.bday = E.factEnd + 5; $('#t').value = S.stage === 'ops' ? S.min : S.bday; refresh(); });
+const q = $('#q'), sug = $('#suggest'); let sugList = [];
+function suggest(text) { const s = text.trim().toLowerCase(), out = [], num = (s.match(/\d+/) || [''])[0]; if (!s) return out;
+  if (/пс|подст|ss|sub/.test(s)) out.push({ label: 'Подстанция 220/33 кВ', hint: 'точка учёта', sel: { level: 'ss' } });
+  if (/фид|fee/.test(s) && num && +num >= 1 && +num <= W.NF) out.push({ label: 'Фидер ' + num, hint: '33 кВ', sel: { level: 'feeder', f: +num - 1 } });
+  if (num && !/фид|fee/.test(s)) for (let i = 0; i < N && out.length < 7; i++) if (wName(i).replace('WTG', '').replace(/^0+/, '').startsWith(String(+num))) out.push({ label: wName(i), hint: 'фидер ' + (W.feeder[i] + 1), sel: { level: 'wtg', i } });
+  return out.slice(0, 7); }
+const goSug = s => { if (S.stage === 'cost' || (S.stage === 'build' && s.sel.level === 'feeder')) setStage('ops', false); select(s.sel, true); sug.classList.remove('open'); };
+q.addEventListener('input', () => { sugList = suggest(q.value); sug.innerHTML = sugList.map((s, i) => `<button data-i="${i}" class="${i ? '' : 'act'}"><span>${s.label}</span><small>${s.hint}</small></button>`).join('') || (q.value.trim() ? '<div style="padding:8px 10px;color:var(--muted)">Не нашёл. Попробуйте «45», «фидер 7» или «подстанция».</div>' : ''); sug.classList.toggle('open', !!q.value.trim()); });
+q.addEventListener('keydown', e => { if (e.key === 'Enter' && sugList[0]) { goSug(sugList[0]); q.blur(); } if (e.key === 'Escape') { q.value = ''; sug.classList.remove('open'); } });
+sug.addEventListener('click', e => { const b = e.target.closest('[data-i]'); if (b) goSug(sugList[+b.dataset.i]); }); q.addEventListener('blur', () => setTimeout(() => sug.classList.remove('open'), 150));
+const ray = new THREE.Raycaster(), ndc = new THREE.Vector2();
+function hitAt(cx, cy) { const r = canvas.getBoundingClientRect(); ndc.set((cx - r.left) / r.width * 2 - 1, -(cy - r.top) / r.height * 2 + 1); ray.setFromCamera(ndc, camera);
+  const h = ray.intersectObject(pickMesh, false)[0], g = ray.intersectObject(terrain, false)[0]; if (h && (!g || h.distance < g.distance + 60)) return { i: h.instanceId };
+  if (g && Math.abs(g.point.x - SITE.ss[0] - 40) < 200 && Math.abs(g.point.z - SITE.ss[1]) < 140) return { ss: 1 }; return null; }
+let down = null, hoverQ = null; const tip = $('#tip');
+canvas.addEventListener('pointerdown', e => { down = { x: e.clientX, y: e.clientY }; tween = null; });
+canvas.addEventListener('pointerup', e => { if (!down || Math.hypot(e.clientX - down.x, e.clientY - down.y) > 5) return; down = null; if (S.stage === 'cost') return; const h = hitAt(e.clientX, e.clientY); if (!h) return select(null); if (h.ss) return select({ level: 'ss' });
+  select(S.stage === 'ops' && S.sel && S.sel.level === 'feeder' ? { level: 'feeder', f: W.feeder[h.i] } : { level: 'wtg', i: h.i }); });
+canvas.addEventListener('pointermove', e => { if (e.pointerType !== 'touch') hoverQ = e; }); canvas.addEventListener('pointerleave', () => { hoverQ = null; tip.style.opacity = 0; });
+function doHover() { const e = hoverQ; hoverQ = null; if (!e || e.buttons || S.stage === 'cost') { tip.style.opacity = 0; return; } const h = hitAt(e.clientX, e.clientY); if (!h) { tip.style.opacity = 0; canvas.style.cursor = ''; return; } canvas.style.cursor = 'pointer';
+  tip.innerHTML = h.ss ? `Подстанция 220/33 кВ <b>${pwf(live.hv)}</b>` : S.stage === 'build' ? `${wName(h.i)} <b>${E.STAGE[bState[h.i].stage].toLowerCase()}</b>` : `${wName(h.i)} <b>${pwf(pw[h.i])}, ${fmt(v[h.i], 1)} м/с</b>`; tip.style.opacity = 1; tip.style.transform = `translate(${e.clientX + 14}px,${e.clientY + 16}px)`; }
+addEventListener('keydown', e => { if (e.key === 'Escape' && document.activeElement !== q) select(null); });
+
+/* ═════════ цикл ═════════ */
+function resize() { const w = canvas.clientWidth, h = canvas.clientHeight, pr = renderer.getPixelRatio(); if (canvas.width !== Math.floor(w * pr) || canvas.height !== Math.floor(h * pr)) { renderer.setSize(w, h, false); camera.aspect = w / h; camera.fov = w / h < 1.15 ? 50 : 36; camera.updateProjectionMatrix(); insets(); } }
+const ease = t => t < .5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2; let last = performance.now(), acc = 0;
+function frame(now) {
+  const dt = Math.min(.1, (now - last) / 1000); last = now; resize();
+  if (S.playing) { acc += dt; if (S.stage === 'ops' && acc >= .14) { S.min += Math.floor(acc / .14) * 5; acc %= .14; if (S.min > 1435) S.min = 0; $('#t').value = S.min; refresh(); }
+    if (S.stage === 'build' && acc >= .06) { acc = 0; S.bday += 2; if (S.bday > E.factEnd + 30) { S.bday = E.factEnd + 30; S.playing = false; $('#play-ic').setAttribute('d', 'M4 2.5v11l9-5.5z'); } $('#t').value = S.bday; refresh(); } }
+  if (tween && now >= tween.t0) { const k = Math.min(1, (now - tween.t0) / tween.ms), e = ease(k); camera.position.lerpVectors(tween.p0, tween.p1, e); controls.target.lerpVectors(tween.a0, tween.a1, e); if (k >= 1) tween = null; }
+  controls.update(); const gy = ground(camera.position.x, camera.position.z) + 12; if (camera.position.y < gy) camera.position.y = gy;
+  const dist = camera.position.distanceTo(controls.target), sh = Math.max(350, Math.min(5000, dist * .7)), sc = sunL.shadow.camera;   // тени — только вокруг точки взгляда
+  if (Math.abs(sc.right - sh) > sh * .15) { sc.left = -sh; sc.right = sh; sc.top = sh; sc.bottom = -sh; sc.near = 100; sc.far = sh * 8; sc.updateProjectionMatrix(); }
+  sunL.target.position.copy(controls.target); sunL.position.copy(controls.target).addScaledVector(sunL.userData.dir || new THREE.Vector3(0, 1, 0), sh * 4);
+  if (hoverQ) doHover(); if (envDirty && now - envTimer > 140) { envDirty = false; envTimer = now; refreshEnv(); }
+  poseRotors(S.stage === 'cost' ? dt : dt); flow(dt); renderer.render(scene, camera); placeLabels(); requestAnimationFrame(frame);
+}
+applyHeights(); layout(); buildCurve(); setStage('ops', false); resize(); refreshEnv();
+{ const vw = VIEWS.ops; if (reduceMotion) { camera.position.set(...vw[0]); controls.target.set(...vw[1]); } else tween = { t0: performance.now() + 300, ms: 3200, p0: camera.position.clone(), p1: new THREE.Vector3(...vw[0]), a0: controls.target.clone(), a1: new THREE.Vector3(...vw[1]) }; }
+requestAnimationFrame(frame); requestAnimationFrame(() => $('#boot')?.classList.add('gone')); loadTerrain();
+window.__twin = { S, live: () => live, select, setStage, refresh, camera, controls, W, E, ground };
