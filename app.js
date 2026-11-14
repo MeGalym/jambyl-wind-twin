@@ -131,7 +131,7 @@ async function loadTerrain() {
   try { const zm = PHONE ? 13 : 14; let tex = null, last = 0; const uv = terGeo.attributes.uv;
     const d = await mosaic(zm, (z, x, y) => `https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/${z}/${y}/${x}`, () => { if (tex && performance.now() - last > 400) { tex.needsUpdate = true; last = performance.now(); } });
     if (d.ok > d.bad) { for (let j = 0; j < NZ; j++) for (let i = 0; i < NX; i++) uv.setXY(j * NX + i, (tX(lonOf(TX0 + i * STEP), zm) - d.x0) * 256 / d.cv.width, 1 - (tY(latOf(TZ0 + j * STEP), zm) - d.y0) * 256 / d.cv.height);
-      uv.needsUpdate = true; tex = new THREE.CanvasTexture(d.cv); tex.colorSpace = THREE.SRGBColorSpace; tex.anisotropy = 8; terMat.map = tex; terMat.color.set(0xffffff); terMat.needsUpdate = true; imgOk = true; } } catch (e) { console.warn('imagery', e); }
+      uv.needsUpdate = true; tex = new THREE.CanvasTexture(d.cv); tex.colorSpace = THREE.SRGBColorSpace; tex.anisotropy = 8; terMat.map = tex; terMat.color.set(0x7f858c); terMat.needsUpdate = true; imgOk = true; } } catch (e) { console.warn('imagery', e); }
   S.terrain = { demOk, imgOk }; status.textContent = demOk && imgOk ? '' : 'Картографический сервис недоступен: рельеф и подложка условные'; setSrc();
 }
 
@@ -164,7 +164,8 @@ const pads = new THREE.InstancedMesh(new THREE.BoxGeometry(70, .5, 42), new THRE
 const pickMesh = new THREE.InstancedMesh(new THREE.CylinderGeometry(55, 55, T.hub + 95, 8).translate(0, (T.hub + 95) / 2, 0), white, N); pickMesh.visible = false;
 const cranes = new THREE.InstancedMesh(new THREE.BoxGeometry(3, 150, 3).translate(0, 75, 0), new THREE.MeshStandardMaterial({ color: 0xf5b544, roughness: .6 }), 4);
 const dotGeo = new THREE.BufferGeometry(), dotPos = new Float32Array(N * 3), dotCol = new Float32Array(N * 3); dotGeo.setAttribute('position', new THREE.BufferAttribute(dotPos, 3)); dotGeo.setAttribute('color', new THREE.BufferAttribute(dotCol, 3));
-const dots = new THREE.Points(dotGeo, new THREE.PointsMaterial({ size: PHONE ? 6 : 7, sizeAttenuation: false, vertexColors: true, toneMapped: false, depthTest: false })); dots.renderOrder = 4; dots.frustumCulled = false;
+const dotTex = (() => { const c = document.createElement('canvas'); c.width = c.height = 64; const g = c.getContext('2d'); g.fillStyle = '#05070b'; g.beginPath(); g.arc(32, 32, 31, 0, 7); g.fill(); g.fillStyle = '#fff'; g.beginPath(); g.arc(32, 32, 22, 0, 7); g.fill(); const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; return t; })();   // круглая метка с тёмной обводкой
+const dots = new THREE.Points(dotGeo, new THREE.PointsMaterial({ size: PHONE ? 10 : 13, sizeAttenuation: false, vertexColors: true, toneMapped: false, depthTest: false, map: dotTex, alphaTest: .5 })); dots.renderOrder = 4; dots.frustumCulled = false;
 scene.add(towers, nacelles, hubs, blades, founds, pads, pickMesh, cranes, dots);
 const baseY = new Float32Array(N), padDir = new Float32Array(N), rot = new Float32Array(N), towerK = new Float32Array(N).fill(1), nacOn = new Uint8Array(N).fill(1), bladeN = new Uint8Array(N).fill(3), foundK = new Float32Array(N).fill(1), padOn = new Uint8Array(N).fill(1);
 { const pts = []; SITE.roads.forEach(f => { for (let i = 0; i < f.length; i += 2) pts.push([f[i], f[i + 1]]); });   // площадка стоит со стороны ближайшей дороги
@@ -287,7 +288,7 @@ function poseXray() { Object.keys(labels).filter(k => k[0] === 'x').forEach(k =>
 /* ═════════ раскраска и слои ═════════ */
 const ramp = stops => t => { t = Math.max(0, Math.min(1, t)) * (stops.length - 1); const i = Math.min(stops.length - 2, Math.floor(t)), f = t - i, a = stops[i], b = stops[i + 1]; return [a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f, a[2] + (b[2] - a[2]) * f]; };
 const hex = h => [(h >> 16 & 255) / 255, (h >> 8 & 255) / 255, (h & 255) / 255], RP = [0x25324d, 0x8a5a1c, 0xf5b544, 0xfff4cf].map(hex), RW = [0x62d6a0, 0xf5b544, 0xf0784a, 0xe5352f].map(hex), R_power = ramp(RP), R_wake = ramp(RW);
-const ST_COL = { 0: 0x62d6a0, 1: 0x8d95a8, 2: 0xb38cff, 3: 0xff5a4a, 4: 0x5b9bea, 5: 0xf5b544, 6: 0xff5a4a, 9: 0x4a443a }, ST_NAME = { 0: 'Работает', 1: 'Ждёт ветра', 2: 'Остановлена: буря', 3: 'Авария', 4: 'Обслуживание', 5: 'Ограничена', 6: 'Отключён фидер', 9: 'Не построена' };
+const ST_COL = { 0: 0xffffff, 1: 0x8d95a8, 2: 0xb38cff, 3: 0xff5a4a, 4: 0x5b9bea, 5: 0xf5b544, 6: 0xff5a4a, 9: 0x4a443a }, ST_NAME = { 0: 'Работает', 1: 'Ждёт ветра', 2: 'Остановлена: буря', 3: 'Авария', 4: 'Обслуживание', 5: 'Ограничена', 6: 'Отключён фидер', 9: 'Не построена' };
 const STAGE_COL = [0x4a443a, 0xa58a5e, 0xc9bea6, 0xb9c2cf, 0xf5b544, 0x5b9bea, 0x7fd4ff, 0x62d6a0];
 function paintDots() {
   for (let i = 0; i < N; i++) { let c;
