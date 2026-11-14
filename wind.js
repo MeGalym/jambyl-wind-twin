@@ -6,8 +6,9 @@
    — СНЭ 300 МВт / 600 МВт·ч (отчёт 104218-EL-RP-050): 141 контейнер по 5016 кВт·ч, 70 станций 5,5 МВА и одна 2,75 МВА,
      готовность 98 %, таблица деградации, дозаполнение по 12 контейнеров каждые 5 лет;
    — три двухцепные ВЛ 220 кВ: две до ПС Жамбыл по 142 км, одна до ПС Кентау 162 км; сечения кабеля из BOQ; готовность ВЭУ 97 %.
-   Допущения: мощность одной ВЭУ принята 1000 МВт / 140, кривая мощности типовая, ветровой отчёт не приложен —
-   роза ветров и распределение Вейбулла заданы; КПД цикла СНЭ 88 %; разбивка ВЭУ по фидерам расчётная. */
+   Ветер: роза и средняя скорость на 100 м — Global Wind Atlas 4.0 (8,93 м/с в окрестности площадки).
+   Допущения: мощность одной ВЭУ принята 1000 МВт / 140, кривая мощности типовая, форма Вейбулла k = 2,
+   ветрового отчёта проекта нет; КПД цикла СНЭ 88 %; разбивка ВЭУ по фидерам расчётная. */
 (function () {
   const SITE = window.SITE, N = SITE.wtg.length, RAD = Math.PI / 180;
   const T = { rated: 7150, D: 195, hub: 110, cutIn: 3, cutOut: 25, storm: 22, cp: 0.46, eff: 0.935, tsr: 9.4, rpmMin: 4.6, rpmMax: 8.9, kWake: 0.075, model: 'SANY SI-19580' };
@@ -80,7 +81,10 @@
   }
 
   /* ветровой климат площадки (допущение) и годовая выработка */
-  const ROSE = [[0, .05, 7.4], [30, .12, 8.6], [60, .20, 9.3], [90, .14, 8.9], [120, .06, 7.6], [150, .04, 7.0], [180, .05, 7.2], [210, .09, 8.2], [240, .12, 8.8], [270, .07, 8.0], [300, .03, 7.0], [330, .03, 7.0]], KW = 2.1;
+  // Global Wind Atlas 4.0, точка 43,351° с. ш., 69,801° в. д., высота 100 м: повторяемость направлений, доля скорости по секторам, средняя скорость по окрестности
+  const GWA = { mean100: 8.93, min: 7.86, max: 9.27, freq: [.03, .05, .14, .19, .10, .03, .04, .21, .12, .05, .02, .02], share: [.02, .03, .14, .21, .11, .03, .03, .26, .13, .04, .01, .01], shear: 0.14 };
+  const KW = 2.0, VMEAN = GWA.mean100 * Math.pow(T.hub / 100, GWA.shear);                    // пересчёт на высоту оси; форма Вейбулла k = 2 принята
+  const ROSE = (() => { const fs = GWA.freq.reduce((a, b) => a + b, 0), ss = GWA.share.reduce((a, b) => a + b, 0); return GWA.freq.map((f, i) => [i * 30, f / fs, VMEAN * (GWA.share[i] / ss) / (f / fs) / 0.8862]); })();
   let AEP = null;
   function aep(avail) {
     if (!AEP) {
@@ -109,11 +113,11 @@
   const speedUp = (h, hm) => Math.max(0.9, Math.min(1.12, 1 + 0.0012 * (h - hm)));     // упрощённое ускорение потока на возвышениях
 
   /* суточный ход ветра для режима эксплуатации */
-  const DAYS = { calm: ['Слабый ветер', 4.6, 1.5], normal: ['Обычный день', 8.4, 2.2], strong: ['Сильный ветер', 13.5, 2.5], storm: ['Буря', 21.5, 4.2] };
+  const DAYS = { calm: ['Слабый ветер', 4.6, 1.5], normal: ['Обычный день', 9.0, 2.3], strong: ['Сильный ветер', 13.5, 2.5], storm: ['Буря', 21.5, 4.2] };
   function windAt(min, day) {
     const h = min / 60, [, base, amp] = DAYS[day];
     return { v: Math.max(0.5, base + amp * Math.sin(2 * Math.PI * (h - 9) / 24) + 0.45 * amp * Math.sin(2 * Math.PI * h / 5.3 + 1) + 0.2 * amp * Math.sin(2 * Math.PI * h / 1.7)),
-      dir: (62 + 20 * Math.sin(2 * Math.PI * (h - 4) / 24) + 9 * Math.sin(2 * Math.PI * h / 6) + 360) % 360, temp: 11 + 7 * Math.cos(2 * Math.PI * (h - 15) / 24) };
+      dir: (88 + 20 * Math.sin(2 * Math.PI * (h - 4) / 24) + 9 * Math.sin(2 * Math.PI * h / 6) + 360) % 360, temp: 11 + 7 * Math.cos(2 * Math.PI * (h - 15) / 24) };
   }
-  window.WIND = { T, EL, BESS, N, NF, X, Z, feeder, fpos, route, elev, feeders, feederTr, density, power, ratedSpeed, ct, rpm, pitch, wake, collect, ohl, section, aep, speedUp, ROSE, KW, DAYS, windAt, resetAep: () => { AEP = null; } };
+  window.WIND = { T, EL, BESS, GWA, VMEAN, N, NF, X, Z, feeder, fpos, route, elev, feeders, feederTr, density, power, ratedSpeed, ct, rpm, pitch, wake, collect, ohl, section, aep, speedUp, ROSE, KW, DAYS, windAt, resetAep: () => { AEP = null; } };
 })();
