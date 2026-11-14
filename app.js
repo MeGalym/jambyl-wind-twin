@@ -1,6 +1,10 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { Sky } from 'three/addons/objects/Sky.js';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 
 const SITE = window.SITE, W = window.WIND, E = window.EPCW, N = W.N, T = W.T;
 const $ = s => document.querySelector(s), $$ = s => document.querySelectorAll(s);
@@ -14,7 +18,9 @@ const R = rng(1000), pick = n => Math.floor(R() * n);
 const wName = i => SITE.wtg[i][0], COMP = ['С', 'ССВ', 'СВ', 'ВСВ', 'В', 'ВЮВ', 'ЮВ', 'ЮЮВ', 'Ю', 'ЮЮЗ', 'ЮЗ', 'ЗЮЗ', 'З', 'ЗСЗ', 'СЗ', 'ССЗ'], compass = d => COMP[Math.round(d / 22.5) % 16];
 
 /* ═════════ состояние и модель эксплуатации ═════════ */
-const S = { stage: 'ops', min: 780, day: 'normal', bday: 600, mode: 'real', bmode: 'stat', sel: null, playing: false, orders: [], fixed: 0, econ: {} };
+const NETS = { normal: ['Все линии в работе', {}], kentau: ['Отключена ВЛ на Кентау', { line: 2 }], jambyl: ['Отключена одна ВЛ на Жамбыл', { line: 0 }], trafo: ['Отключён трансформатор Т2', { tr: 1 }], cap: ['Ограничение оператора 600 МВт', { lim: 600 }] };
+const STRATS = { agc: 'АРЧМ: регулирование частоты', smooth: 'Сглаживание выдачи', shift: 'Сдвиг на вечерний пик', firm: 'Ровный суточный график', idle: 'Резерв, без циклов' };
+const S = { stage: 'ops', min: 780, day: 'normal', net: 'normal', strat: 'smooth', bday: 600, mode: 'real', bmode: 'stat', sel: null, playing: false, orders: [], fixed: 0, econ: {} };
 // условные отказы: 0 работает, 3 авария, 4 обслуживание, 5 ограничение мощности
 const fault = new Uint8Array(N), faultText = {}, derate = new Float32Array(N).fill(1), tripped = new Uint8Array(W.NF);
 [['Перегрев подшипника генератора', 3], ['Отказ привода поворота лопасти', 3], ['Ошибка преобразователя частоты', 3], ['Плановое обслуживание', 4], ['Плановое обслуживание', 4]].forEach(([t, c]) => { let i; do i = pick(N); while (fault[i]); fault[i] = c; faultText[i] = t; });
@@ -36,16 +42,24 @@ function compute(min) {
     st[i] = !built[i] ? 9 : tripped[W.feeder[i]] ? 6 : fault[i] === 3 ? 3 : fault[i] === 4 ? 4 : v[i] >= T.cutOut ? 2 : v[i] < T.cutIn ? 1 : fault[i] === 5 ? 5 : 0;
     rpm[i] = run[i] ? W.rpm(v[i]) : 0.15;
   }
-  const c = W.collect(pw, tripped);
-  return { w, free, waked, act, mv: c.mvLoss, tr: c.trLoss, hv: c.hv, trLoad: c.trLoad, fP: c.fP };
+  const c = W.collect(pw, tripped, NETS[S.net][1].tr ?? -1);
+  return { w, free, waked, act, mv: c.mvLoss, tr: c.trLoss, hv: c.hv, trLoad: c.trLoad, fP: c.fP, over: c.over };
 }
-let curve = [], windC = [], bess = [], soc = [], eDay = 0;
+let curve = [], windHv = [], windC = [], bess = [], soc = [], curt = [], eDay = 0, bCap = W.BESS.capacity(1);
 function buildCurve() {
-  curve = []; windC = []; for (let m = 0; m <= 1440; m += 10) { const r = compute(m); curve.push(r.hv / 1000); windC.push(r.w.v); }
-  bess = []; soc = []; let e = W.EL.bessMwh * 0.5;                      // накопитель сглаживает выдачу вокруг скользящего среднего
-  for (let k = 0; k < curve.length; k++) { let ma = 0, n = 0; for (let j = Math.max(0, k - 9); j <= Math.min(curve.length - 1, k + 9); j++) { ma += curve[j]; n++; }
-    let p = Math.max(-W.EL.bessMw, Math.min(W.EL.bessMw, curve[k] - ma / n)); if (p > 0) p = Math.min(p, (W.EL.bessMwh * 0.95 - e) * 6); else p = Math.max(p, -(e - W.EL.bessMwh * 0.05) * 6);
-    e += p / 6; bess.push(p); soc.push(e / W.EL.bessMwh); }
+  windHv = []; windC = []; for (let m = 0; m <= 1440; m += 10) { const r = compute(m); windHv.push(r.hv / 1000); windC.push(r.w.v); }
+  // накопитель: 300 МВт, полезная ёмкость первого года; излишек сверх ограничения сети сначала идёт в заряд, остаток срезается
+  const B = W.BESS, lim = NETS[S.net][1].lim ?? 1000, n = windHv.length, mean = windHv.reduce((a, b) => a + b, 0) / n, ec = Math.sqrt(B.rte), dt = 1 / 6; bCap = B.capacity(1);
+  curve = []; bess = []; soc = []; curt = []; let e = bCap * 0.5;
+  for (let k = 0; k < n; k++) { const w = windHv[k], h = k / 6; let p = 0;
+    if (S.strat === 'smooth') { let ma = 0, c = 0; for (let j = Math.max(0, k - 9); j <= Math.min(n - 1, k + 9); j++) { ma += windHv[j]; c++; } p = w - ma / c; }
+    else if (S.strat === 'shift') p = h < 7 ? Math.min(w, 110) : h >= 18 && h < 22 ? -150 : 0;
+    else if (S.strat === 'firm') p = w - mean;
+    if (w - p > lim) p = w - lim;
+    p = Math.max(-B.mw, Math.min(B.mw, p, w));
+    if (p > 0) { p = Math.max(0, Math.min(p, (bCap * 0.98 - e) / (ec * dt))); e += p * ec * dt; } else { p = Math.min(0, Math.max(p, -(e - bCap * 0.03) * ec / dt)); e += p / ec * dt; }
+    let g = w - p, cu = 0; if (g > lim) { cu = g - lim; g = lim; }
+    curve.push(g); bess.push(p); soc.push(e / bCap); curt.push(cu); }
   eDay = curve.reduce((s, x, i) => i ? s + (x + curve[i - 1]) / 12 : 0, 0);
 }
 const energyUntil = min => { let e = 0; const n = Math.floor(min / 10); for (let i = 1; i <= n; i++) e += (curve[i] + curve[i - 1]) / 12; return e; };
@@ -54,8 +68,10 @@ const energyUntil = min => { let e = 0; const n = Math.floor(min / 10); for (let
 const canvas = $('#scene');
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance', logarithmicDepthBuffer: true });
 renderer.setPixelRatio(Math.min(devicePixelRatio, 2)); renderer.toneMapping = THREE.ACESFilmicToneMapping; renderer.shadowMap.enabled = true; renderer.shadowMap.type = THREE.PCFSoftShadowMap;
-const scene = new THREE.Scene(); scene.fog = new THREE.Fog(0xb9c4d2, 14000, 90000);
+const scene = new THREE.Scene(); scene.fog = new THREE.Fog(0xb9c4d2, 20000, 130000);
 const camera = new THREE.PerspectiveCamera(36, 1, 5, 200000); camera.position.set(-22000, 16000, 30000);
+let composer = null;   // мягкое свечение ярких участков; на телефоне выключено
+try { if (!PHONE) { composer = new EffectComposer(renderer, new THREE.WebGLRenderTarget(4, 4, { type: THREE.HalfFloatType, samples: 4 })); composer.addPass(new RenderPass(scene, camera)); composer.addPass(new UnrealBloomPass(new THREE.Vector2(4, 4), 0.2, 0.6, 0.96)); composer.addPass(new OutputPass()); } } catch (e) { console.warn('composer', e); composer = null; }
 const controls = new OrbitControls(camera, canvas);
 Object.assign(controls, { enableDamping: true, dampingFactor: .08, maxPolarAngle: 87 * RAD, minDistance: 60, maxDistance: 60000, zoomToCursor: true });
 const sky = new Sky(); sky.scale.setScalar(150000); Object.assign(sky.material.uniforms.turbidity, { value: 4 }); sky.material.uniforms.rayleigh.value = 1.2; sky.material.uniforms.mieCoefficient.value = .004; sky.material.uniforms.mieDirectionalG.value = .82; scene.add(sky);
@@ -69,7 +85,7 @@ function applySun(min) {
   const k = THREE.MathUtils.smoothstep(el, -3, 9), low = THREE.MathUtils.smoothstep(el, 0, 22);
   sunL.intensity = 3.4 * k; sunL.color.setRGB(1, .72 + .26 * low, .5 + .44 * low); sunL.userData.dir = d.y > 0.03 ? d : new THREE.Vector3(d.x, 0.03, d.z).normalize();
   hemi.intensity = .1 + .95 * k; hemi.color.setRGB(.55 + .3 * k, .66 + .22 * k, 1); hemi.groundColor.setRGB(.5 * k + .05, .44 * k + .05, .33 * k + .06);
-  scene.fog.color.set(0x0b1019).lerp(new THREE.Color(0xd2a383), k).lerp(new THREE.Color(0xbcc7d4), low); renderer.toneMappingExposure = .34 + .2 * k; envDirty = true; live.night = el < 0; live.el = el;
+  scene.fog.color.set(0x0b1019).lerp(new THREE.Color(0xd2a383), k).lerp(new THREE.Color(0xbcc7d4), low); renderer.toneMappingExposure = .27 + .17 * k; CLOUD.uCloud.value = .34 * k; envDirty = true; live.night = el < 0; live.el = el;
 }
 function refreshEnv() { envScene.add(sky); const rt = pmrem.fromScene(envScene, 0, 1, 200000); scene.add(sky); if (envRT) envRT.dispose(); envRT = rt; scene.environment = rt.texture; scene.environmentIntensity = .25 + .75 * THREE.MathUtils.smoothstep(live.el ?? 40, -4, 10); }
 
@@ -83,6 +99,15 @@ const M = SITE.meta, lonOf = x => M.lon0 + x / M.kx, latOf = z => M.lat0 - z / M
 const tX = (lon, zm) => (lon + 180) / 360 * 2 ** zm, tY = (lat, zm) => (1 - Math.log(Math.tan(lat * RAD) + 1 / Math.cos(lat * RAD)) / Math.PI) / 2 * 2 ** zm;
 const terGeo = new THREE.PlaneGeometry(TX1 - TX0, TZ1 - TZ0, NX - 1, NZ - 1); terGeo.rotateX(-Math.PI / 2); terGeo.translate((TX0 + TX1) / 2, 0, (TZ0 + TZ1) / 2);
 const terMat = new THREE.MeshStandardMaterial({ color: 0xb9ac8a, roughness: 1, metalness: 0 }), terrain = new THREE.Mesh(terGeo, terMat); terrain.receiveShadow = true; scene.add(terrain);
+const CLOUD = { uOff: { value: new THREE.Vector2() }, uCloud: { value: 0.3 } };
+terMat.onBeforeCompile = sh => { Object.assign(sh.uniforms, CLOUD);
+  sh.vertexShader = sh.vertexShader.replace('#include <common>', '#include <common>\nvarying vec2 vWxz;').replace('#include <begin_vertex>', '#include <begin_vertex>\nvWxz = position.xz;');
+  sh.fragmentShader = sh.fragmentShader.replace('#include <common>', `#include <common>
+    uniform vec2 uOff; uniform float uCloud; varying vec2 vWxz;
+    float hsh(vec2 p){return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453);}
+    float nz(vec2 p){vec2 i=floor(p),f=fract(p);f=f*f*(3.0-2.0*f);return mix(mix(hsh(i),hsh(i+vec2(1,0)),f.x),mix(hsh(i+vec2(0,1)),hsh(i+vec2(1,1)),f.x),f.y);}
+    float fbm(vec2 p){float a=.5,s=0.;for(int i=0;i<4;i++){s+=a*nz(p);p*=2.03;a*=.5;}return s;}`)
+    .replace('#include <map_fragment>', '#include <map_fragment>\ndiffuseColor.rgb *= 1.0 - uCloud*smoothstep(0.47,0.68,fbm(vWxz*0.00016+uOff));'); };
 function applyHeights() {
   let mn = 1e9, sm = 0; for (let k = 0; k < hAbs.length; k++) { if (hAbs[k] < mn) mn = hAbs[k]; } E0 = mn;
   const p = terGeo.attributes.position; for (let k = 0; k < p.count; k++) p.setY(k, hAbs[k] - E0); p.needsUpdate = true; terGeo.computeVertexNormals(); terGeo.computeBoundingSphere();
@@ -123,10 +148,17 @@ function ribbonOf(polys, wdt, lift, mat) { const pos = [], idx = []; for (const 
 /* ВЭУ: башни, гондолы, лопасти — экземпляры одной геометрии */
 const white = new THREE.MeshStandardMaterial({ color: 0xe4e7ea, roughness: .5, metalness: .1 }), grey = new THREE.MeshStandardMaterial({ color: 0x9aa0a8, roughness: .7, metalness: .4 }), dark = new THREE.MeshStandardMaterial({ color: 0x3b424d, roughness: .7, metalness: .3 }), concrete = new THREE.MeshStandardMaterial({ color: 0x8f8b80, roughness: 1 });
 const towers = new THREE.InstancedMesh(new THREE.CylinderGeometry(2.1, 3.5, T.hub, 14).translate(0, T.hub / 2, 0), white, N); towers.castShadow = true;
-const nacelles = new THREE.InstancedMesh(new THREE.BoxGeometry(4.6, 4.8, 15).translate(0, 0, -2.5), white, N); nacelles.castShadow = true;
-const hubs = new THREE.InstancedMesh(new THREE.SphereGeometry(2.7, 14, 10).scale(1, 1, 1.4).translate(0, 0, 7), white, N);
-const BL = T.D / 2 - 2, bladeGeo = new THREE.CylinderGeometry(0.28, 2.1, BL, 8).scale(1, 1, 0.28).translate(0, BL / 2 + 2, 7.4);
-const blades = new THREE.InstancedMesh(bladeGeo, white, N * 3); blades.castShadow = true;
+const nacGeo = new THREE.CapsuleGeometry(2.6, 10.5, 6, 16).rotateX(Math.PI / 2).translate(0, .3, -2.2), nacelles = new THREE.InstancedMesh(nacGeo, white, N); nacelles.castShadow = true;
+const hubs = new THREE.InstancedMesh(new THREE.SphereGeometry(2.9, 18, 12).scale(1, 1, 1.7).translate(0, 0, 6.6), white, N);
+function bladeGeometry(L) {            // сечения от комля к законцовке: хорда, толщина и крутка
+  const NS = 22, NC = 10, pos = [], idx = [];
+  for (let k = 0; k <= NS; k++) { const r = k / NS, y = 2 + r * L, q = Math.max(0, (r - .22) / .78);
+    const chord = r < .04 ? 2.6 : r < .22 ? 2.6 + 2.1 * (r - .04) / .18 : 4.7 - 4.0 * Math.pow(q, .85), thick = r < .04 ? 2.6 : r < .22 ? 2.6 - 1.4 * (r - .04) / .18 : 1.2 * Math.pow(1 - q, 1.3) + .12, tw = (16 * (1 - r) * (1 - r) - 2) * RAD;
+    for (let c = 0; c < NC; c++) { const a = c / NC * Math.PI * 2, ex = Math.cos(a) * chord / 2 - (r > .04 ? chord * .15 : 0), ez = Math.sin(a) * thick / 2; pos.push(ex * Math.cos(tw) - ez * Math.sin(tw), y, ex * Math.sin(tw) + ez * Math.cos(tw) + 7.4); } }
+  for (let k = 0; k < NS; k++) for (let c = 0; c < NC; c++) { const a = k * NC + c, b = k * NC + (c + 1) % NC; idx.push(a, a + NC, b, b, a + NC, b + NC); }
+  const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3)); g.setIndex(idx); g.computeVertexNormals(); return g; }
+const bladeMat = white.clone(); bladeMat.side = THREE.DoubleSide;
+const blades = new THREE.InstancedMesh(bladeGeometry(T.D / 2 - 2), bladeMat, N * 3); blades.castShadow = true;
 const founds = new THREE.InstancedMesh(new THREE.CylinderGeometry(11.5, 12.5, 1.2, 24), concrete, N); founds.receiveShadow = true;
 const pads = new THREE.InstancedMesh(new THREE.BoxGeometry(70, .5, 42), new THREE.MeshStandardMaterial({ color: 0xa79a80, roughness: 1 }), N); pads.receiveShadow = true;
 const pickMesh = new THREE.InstancedMesh(new THREE.CylinderGeometry(55, 55, T.hub + 95, 8).translate(0, (T.hub + 95) / 2, 0), white, N); pickMesh.visible = false;
@@ -138,7 +170,7 @@ const baseY = new Float32Array(N), padDir = new Float32Array(N), rot = new Float
 { const pts = []; SITE.roads.forEach(f => { for (let i = 0; i < f.length; i += 2) pts.push([f[i], f[i + 1]]); });   // площадка стоит со стороны ближайшей дороги
   for (let i = 0; i < N; i++) { let bd = 1e9, b = null; for (const p of pts) { const d = (p[0] - W.X[i]) ** 2 + (p[1] - W.Z[i]) ** 2; if (d < bd && d > 400) { bd = d; b = p; } } padDir[i] = Math.atan2(b[0] - W.X[i], b[1] - W.Z[i]); rot[i] = R() * 6.28; } }
 const dm = new THREE.Object3D(), ZERO = new THREE.Matrix4().makeScale(0, 0, 0), qY = new THREE.Quaternion(), qS = new THREE.Quaternion(), AX_Y = new THREE.Vector3(0, 1, 0), AX_Z = new THREE.Vector3(0, 0, 1);
-let yaw = 0, ssY = 0;
+let yaw = 0, ssY = 0, xrI = -1;
 function poseStatic() {
   for (let i = 0; i < N; i++) { const x = W.X[i], z = W.Z[i], y = baseY[i];
     dm.rotation.set(0, 0, 0); dm.scale.set(1, Math.max(towerK[i], 0), 1); dm.position.set(x, y, z); dm.updateMatrix(); towerK[i] > 0 ? towers.setMatrixAt(i, dm.matrix) : towers.setMatrixAt(i, ZERO); pickMesh.setMatrixAt(i, dm.matrix.clone().scale(new THREE.Vector3(1, 1 / Math.max(towerK[i], 1e-3), 1)));
@@ -150,8 +182,9 @@ function poseStatic() {
 function poseRotors(dt) {
   qY.setFromAxisAngle(AX_Y, yaw);
   for (let i = 0; i < N; i++) {
+    if (i === xrI) { nacelles.setMatrixAt(i, ZERO); } 
     if (!nacOn[i]) { nacelles.setMatrixAt(i, ZERO); hubs.setMatrixAt(i, ZERO); for (let k = 0; k < 3; k++) blades.setMatrixAt(i * 3 + k, ZERO); continue; }
-    dm.position.set(W.X[i], baseY[i] + T.hub + 1.5, W.Z[i]); dm.quaternion.copy(qY); dm.scale.set(1, 1, 1); dm.updateMatrix(); nacelles.setMatrixAt(i, dm.matrix); hubs.setMatrixAt(i, dm.matrix);
+    dm.position.set(W.X[i], baseY[i] + T.hub + 1.5, W.Z[i]); dm.quaternion.copy(qY); dm.scale.set(1, 1, 1); dm.updateMatrix(); if (i !== xrI) nacelles.setMatrixAt(i, dm.matrix); hubs.setMatrixAt(i, dm.matrix);
     rot[i] += rpm[i] * 0.10472 * dt;
     for (let k = 0; k < 3; k++) { if (k >= bladeN[i]) { blades.setMatrixAt(i * 3 + k, ZERO); continue; } qS.setFromAxisAngle(AX_Z, rot[i] + k * 2.0944); dm.quaternion.copy(qY).multiply(qS); dm.updateMatrix(); blades.setMatrixAt(i * 3 + k, dm.matrix); }
   }
@@ -165,21 +198,34 @@ const feederCol = f => new THREE.Color().setHSL((f * 0.618) % 1, .7, .58);
 function box(w, h, d, mat, x, y, z, parent) { const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat); m.position.set(x, y + h / 2, z); m.castShadow = m.receiveShadow = true; parent.add(m); return m; }
 function layout() {
   dyn.clear(); for (let i = 0; i < N; i++) baseY[i] = ground(W.X[i], W.Z[i]);
+  if (SITE.access) dyn.add(ribbonOf(SITE.access, 3, 0.7, new THREE.MeshStandardMaterial({ color: 0xd6ccb6, roughness: 1, polygonOffset: true, polygonOffsetFactor: -4, polygonOffsetUnits: -4 })));
   dyn.add(ribbonOf(SITE.roads, 9, 0.6, new THREE.MeshStandardMaterial({ color: 0xc9bea6, roughness: 1, polygonOffset: true, polygonOffsetFactor: -4, polygonOffsetUnits: -4 })));
   trenchG = new THREE.Group(); for (const k of ['B1', 'B2', 'B3', 'B4']) trenchG.add(lineOf(SITE.trench[k], 60, 2.5, new THREE.LineBasicMaterial({ color: TR_COL[k], toneMapped: false }))); dyn.add(trenchG);
   zoneG = new THREE.Group(); const ZC = { arch: 0xc77dff, bio: 0x4ade80, anthrax: 0xff5a4a }; for (const kind of ['arch', 'bio', 'anthrax']) zoneG.add(lineOf(SITE.zones.filter(q => q[0] === kind).map(q => q.slice(1)), 80, 6, new THREE.LineBasicMaterial({ color: ZC[kind], toneMapped: false }))); dyn.add(zoneG);
   feederG = new THREE.Group(); { const seg = [], col = []; W.feeders.forEach((m, f) => { const c = feederCol(f); for (let k = 0; k < m.length; k++) { const a = m[k], bx = k + 1 < m.length ? W.X[m[k + 1]] : SITE.ss[0], bz = k + 1 < m.length ? W.Z[m[k + 1]] : SITE.ss[1];
         seg.push(W.X[a], baseY[a] + T.hub + 8, W.Z[a], bx, ground(bx, bz) + (k + 1 < m.length ? T.hub + 8 : 30), bz); col.push(c.r, c.g, c.b, c.r, c.g, c.b); } });
     const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.Float32BufferAttribute(seg, 3)); g.setAttribute('color', new THREE.Float32BufferAttribute(col, 3)); feederG.add(new THREE.LineSegments(g, new THREE.LineBasicMaterial({ vertexColors: true, toneMapped: false, transparent: true, opacity: .9 }))); } dyn.add(feederG);
-  // подстанция 33/220 кВ и накопитель (компоновка условная: в RFP только однолинейная схема)
-  const sx = SITE.ss[0], sz = SITE.ss[1]; let sy = -1e9; for (const [ax, az] of [[-150, -128], [228, -128], [228, 128], [-150, 128], [40, 0]]) sy = Math.max(sy, ground(sx + ax, sz + az)); const ss = new THREE.Group(); ss.position.set(sx, sy, sz); dyn.add(ss);
-  box(384, 60, 262, concrete, 39, -59.4, 0, ss);
-  for (let k = 0; k < W.EL.trafos; k++) { const x = -75 + k * 50; box(11, 8, 7, dark, x, 0, -20, ss).userData.ss = 1; box(14, 5.5, 2.5, grey, x, 1, -26, ss); box(14, 5.5, 2.5, grey, x, 1, -14, ss); box(1, 9, 1, grey, x - 3, 8, -20, ss); box(1, 9, 1, grey, x + 3, 8, -20, ss); }
-  box(120, 8, 18, white, 0, 0, 25, ss).userData.ss = 1; box(121, .6, 19, dark, 0, 8, 25, ss); box(40, 7, 16, white, -95, 0, 60, ss); box(41, .5, 17, dark, -95, 7, 60, ss);
-  const gant = new THREE.Group(); for (let k = 0; k < 8; k++) { const x = -105 + k * 30; box(1.2, 17, 1.2, grey, x, 0, -62, gant); box(1.2, 17, 1.2, grey, x, 0, -98, gant); box(1.2, 1.2, 37, grey, x, 16, -80, gant); } box(212, 1, 1, grey, 0, 12, -62, gant); box(212, 1, 1, grey, 0, 12, -98, gant); ss.add(gant);
-  const bc = new THREE.InstancedMesh(new THREE.BoxGeometry(12.2, 2.9, 2.44), white, 120); bc.castShadow = true; for (let k = 0; k < 120; k++) { dm.rotation.set(0, 0, 0); dm.scale.set(1, 1, 1); dm.position.set(105 + (k % 6) * 17, 2, -100 + Math.floor(k / 6) * 9.5); dm.updateMatrix(); bc.setMatrixAt(k, dm.matrix); } ss.add(bc);
-  for (let k = 0; k < 10; k++) box(5, 3, 3, dark, 215, .2, -95 + k * 19, ss);
-  { const f = [[-150, -128], [228, -128], [228, 128], [-150, 128], [-150, -128]], seg = []; for (let i = 0; i < 4; i++) for (const y of [1, 2, 3]) seg.push(f[i][0], y, f[i][1], f[i + 1][0], y, f[i + 1][1]); const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.Float32BufferAttribute(seg, 3)); ss.add(new THREE.LineSegments(g, new THREE.LineBasicMaterial({ color: 0x6d7480 }))); }
+  // подстанция 220/35 кВ по ведомости HV-AIS и площадка СНЭ по чертежу 104218-EL-DW-100; взаимное расположение условное
+  const sx = SITE.ss[0], sz = SITE.ss[1]; let sy = -1e9; for (const [ax, az] of [[-175, -120], [580, -120], [580, 120], [-175, 120], [200, 0]]) sy = Math.max(sy, ground(sx + ax, sz + az)); const ss = new THREE.Group(); ss.position.set(sx, sy, sz); dyn.add(ss);
+  box(776, 60, 256, concrete, 201, -59.4, 0, ss);
+  for (let k = 0; k < 14; k++) { const x = -130 + k * 20; for (const z of [-106, -80, -54]) { box(.8, 15, .8, grey, x - 7, 0, z, ss); box(.8, 15, .8, grey, x + 7, 0, z, ss); box(15, .8, .8, grey, x, 14.5, z, ss); } box(1.6, 5.5, 1.6, dark, x, 0, -93, ss); box(1, 4.5, 1, grey, x, 0, -67, ss); }
+  for (const z of [-99, -86, -73]) box(276, .5, .5, grey, 0, 10, z, ss);
+  for (let k = 0; k < 6; k++) { const x = -115 + k * 46; box(12, 8.5, 7.5, dark, x, 0, -30, ss); box(15, 6, 2.6, grey, x, 1, -37, ss); box(15, 6, 2.6, grey, x, 1, -23, ss); for (const o of [-3.5, 0, 3.5]) box(.8, 5, .8, white, x + o, 8.5, -30, ss); if (k < 5) box(.8, 10, 17, concrete, x + 23, 0, -30, ss);
+    box(34, 6.5, 13, white, x, 0, 2, ss); box(35, .5, 14, dark, x, 6.5, 2, ss); }
+  { const sv = new THREE.InstancedMesh(new THREE.BoxGeometry(12.2, 2.9, 2.6), white, 20), co = new THREE.InstancedMesh(new THREE.CylinderGeometry(1.6, 1.6, 3.4, 14), grey, 20); sv.castShadow = true;
+    for (let k = 0; k < 20; k++) { dm.rotation.set(0, 0, 0); dm.scale.set(1, 1, 1); dm.position.set(-125 + (k % 10) * 27, 2, 32 + Math.floor(k / 10) * 24); dm.updateMatrix(); sv.setMatrixAt(k, dm.matrix); dm.position.x += 9.5; dm.position.y = 2.2; dm.updateMatrix(); co.setMatrixAt(k, dm.matrix); } ss.add(sv, co); }
+  box(38, 8, 16, white, -140, 0, 96, ss); box(39, .5, 17, dark, -140, 8, 96, ss); box(46, 9, 22, new THREE.MeshStandardMaterial({ color: 0x8fa0b3, roughness: .6, metalness: .4 }), -82, 0, 93, ss);
+  const BX = 190, asphalt = new THREE.MeshStandardMaterial({ color: 0x5a5d61, roughness: 1 });
+  for (const z of [-66, 0, 66]) box(372, .25, 6, asphalt, BX + 187.8, .05, z, ss); for (const x of [6, 143.7, 281.4, 369.6]) box(6, .25, 138, asphalt, BX + x, .05, 0, ss);
+  { const NE = W.BESS.encl, NS = W.BESS.mvs, en = new THREE.InstancedMesh(new THREE.BoxGeometry(6.06, 2.9, 2.44), white, NE), sk = new THREE.InstancedMesh(new THREE.BoxGeometry(6, 2.6, 2.4), dark, NS); en.castShadow = sk.castShadow = true; let ne = 0, ns = 0; dm.rotation.set(0, 0, 0); dm.scale.set(1, 1, 1);
+    for (const zc of [-33, 33]) for (const x0 of [9, 146.71]) for (let c = 0; c < 9; c++) { const x = BX + x0 + 10.3 + c * 13.63;
+        for (const dz of [-22, -9, 9, 22]) if (ne < NE) { dm.position.set(x, 1.9, zc + dz); dm.updateMatrix(); en.setMatrixAt(ne++, dm.matrix); }
+        for (const dz of [-15.5, 15.5]) if (ns < NS) { dm.position.set(x, 1.75, zc + dz); dm.updateMatrix(); sk.setMatrixAt(ns++, dm.matrix); } }
+    ss.add(en, sk);
+    const seg = [], rect = (x0, z0, x1, z1, y) => seg.push(x0, y, z0, x1, y, z0, x1, y, z0, x1, y, z1, x1, y, z1, x0, y, z1, x0, y, z1, x0, y, z0);
+    for (const zc of [-33, 33]) for (const h of [0, 1]) rect(BX + 284.4 + h * 42, zc - 27, BX + 284.4 + h * 42 + 40, zc + 27, .6);     // четыре площадки под дозаполнение
+    for (const y of [1, 2, 3]) { rect(BX - 3, -73, BX + 378.6, 73, y); rect(-172, -118, 152, 118, y); }
+    const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.Float32BufferAttribute(seg, 3)); ss.add(new THREE.LineSegments(g, new THREE.LineBasicMaterial({ color: 0x7d8490 }))); box(6, 3, 4, white, BX + 12, 0, 80, ss); }
   // три двухцепные ВЛ 220 кВ: две на юго-восток к ПС Жамбыл, одна на запад к ПС Кентау (направления условные)
   ohlG = new THREE.Group(); dyn.add(ohlG); const tw = [], wires = [];
   [[112, -40], [112, 40], [283, 0]].forEach(([brg, off]) => { const dx = Math.sin(brg * RAD), dz = -Math.cos(brg * RAD), px = -dz * off, pz = dx * off; let prev = null;
@@ -190,16 +236,53 @@ function layout() {
   const tm = new THREE.InstancedMesh(new THREE.CylinderGeometry(.9, 4.2, 44, 4).translate(0, 22, 0), grey, tw.length), am = new THREE.InstancedMesh(new THREE.BoxGeometry(20, .8, .8), grey, tw.length * 3); tm.castShadow = true;
   tw.forEach(([x, y, z, b], i) => { dm.scale.set(1, 1, 1); dm.rotation.set(0, -b * RAD + Math.PI / 4, 0); dm.position.set(x, y, z); dm.updateMatrix(); tm.setMatrixAt(i, dm.matrix); [24, 31, 38].forEach((h, k) => { dm.rotation.set(0, -b * RAD, 0); dm.position.set(x, y + h, z); dm.scale.set(1 - k * .12, 1, 1); dm.updateMatrix(); am.setMatrixAt(i * 3 + k, dm.matrix); }); });
   dm.scale.set(1, 1, 1); ohlG.add(tm, am); { const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.Float32BufferAttribute(wires, 3)); ohlG.add(new THREE.LineSegments(g, new THREE.LineBasicMaterial({ color: 0x2c3138, transparent: true, opacity: .8 }))); }
-  if (labels.ss) labels.ss.p.set(sx, sy + 40, sz); ssY = sy; poseStatic(); layers();
+  if (labels.ss) { labels.ss.p.set(sx - 10, sy + 40, sz - 30); labels.bess.p.set(sx + 378, sy + 30, sz); } ssY = sy; poseStatic(); layers();
 }
 
-/* потоки ветра */
-const NPART = PHONE ? 700 : 1800, partPos = new Float32Array(NPART * 6), partXZ = new Float32Array(NPART * 3), partGeo = new THREE.BufferGeometry(); partGeo.setAttribute('position', new THREE.BufferAttribute(partPos, 3));
-for (let k = 0; k < NPART; k++) { partXZ[k * 3] = TX0 + R() * (TX1 - TX0); partXZ[k * 3 + 1] = TZ0 + R() * (TZ1 - TZ0); partXZ[k * 3 + 2] = 40 + R() * 190; }
-const streaks = new THREE.LineSegments(partGeo, new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: .34, toneMapped: false, depthWrite: false })); streaks.frustumCulled = false; scene.add(streaks);
-function flow(dt) { const w = live.w; if (!w || !streaks.visible) return; const fx = -Math.sin(w.dir * RAD), fz = Math.cos(w.dir * RAD), sp = w.v * 14 * dt, len = 60 + w.v * 22;
-  for (let k = 0; k < NPART; k++) { let x = partXZ[k * 3] + fx * sp, z = partXZ[k * 3 + 1] + fz * sp; if (x < TX0 || x > TX1 || z < TZ0 || z > TZ1) { x = TX0 + Math.random() * (TX1 - TX0); z = TZ0 + Math.random() * (TZ1 - TZ0); } partXZ[k * 3] = x; partXZ[k * 3 + 1] = z; const y = ground(x, z) + partXZ[k * 3 + 2];
-    partPos[k * 6] = x; partPos[k * 6 + 1] = y; partPos[k * 6 + 2] = z; partPos[k * 6 + 3] = x - fx * len; partPos[k * 6 + 4] = y; partPos[k * 6 + 5] = z - fz * len; } partGeo.attributes.position.needsUpdate = true; }
+/* поле ветра: частицы летят со скоростью потока в своей точке — быстрее над возвышениями, медленнее в следах ВЭУ */
+const NPART = PHONE ? 700 : 2400, TL = 12, pHead = new Float32Array(NPART * 3), trail = new Float32Array(NPART * TL * 3), tcol = new Float32Array(NPART * TL * 3), pBase = new Float32Array(NPART * 3);
+const flowGeo = new THREE.BufferGeometry(); flowGeo.setAttribute('position', new THREE.BufferAttribute(trail, 3)); flowGeo.setAttribute('color', new THREE.BufferAttribute(tcol, 3));
+{ const ix = []; for (let k = 0; k < NPART; k++) for (let j = 0; j < TL - 1; j++) ix.push(k * TL + j, k * TL + j + 1); flowGeo.setIndex(ix); }
+const streaks = new THREE.LineSegments(flowGeo, new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, opacity: .8, blending: THREE.AdditiveBlending, depthWrite: false, toneMapped: false })); streaks.frustumCulled = false; scene.add(streaks);
+const wS = new Float32Array(N), wC = new Float32Array(N), wK = new Float32Array(N); let fX = 0, fZ = 1, flowAcc = 0;
+function windField() { const w = live.w; fX = -Math.sin(w.dir * RAD); fZ = Math.cos(w.dir * RAD); for (let i = 0; i < N; i++) { wS[i] = W.X[i] * fX + W.Z[i] * fZ; wC[i] = W.X[i] * fZ - W.Z[i] * fX; wK[i] = run[i] ? 1 - Math.sqrt(1 - W.ct(v[i], rho[i])) : 0; } }
+function fieldAt(x, z, h) {            // отношение местной скорости к скорости набегающего потока
+  const sp = x * fX + z * fZ, cp = x * fZ - z * fX; let s2 = 0;
+  if (h < 230) for (let i = 0; i < N; i++) { const dx = sp - wS[i]; if (dx < 15 || dx > 7500 || wK[i] === 0) continue; const rw = T.D / 2 + T.kWake * dx, dy = cp - wC[i]; if (dy < rw && dy > -rw) { const d = wK[i] * (T.D / 2 / rw) * (T.D / 2 / rw); s2 += d * d; } }
+  return W.speedUp(ground(x, z) + E0, hMean) * (1 - Math.min(.6, Math.sqrt(s2)));
+}
+function spawn(k, anywhere) { const along = anywhere ? Math.random() : Math.random() * .08, across = Math.random(), L = 30000;      // новые частицы входят с наветренной стороны
+  let x = (across - .5) * L * fZ - (along - .5) * -L * fX, z = -(across - .5) * L * fX + (along - .5) * L * fZ; if (x < TX0 + 50 || x > TX1 - 50 || z < TZ0 + 50 || z > TZ1 - 50) { x = TX0 + 50 + Math.random() * (TX1 - TX0 - 100); z = TZ0 + 50 + Math.random() * (TZ1 - TZ0 - 100); }
+  pHead[k * 3] = x; pHead[k * 3 + 1] = z; pHead[k * 3 + 2] = 35 + Math.random() * 185; const y = ground(x, z) + pHead[k * 3 + 2]; for (let j = 0; j < TL; j++) { trail[(k * TL + j) * 3] = x; trail[(k * TL + j) * 3 + 1] = y; trail[(k * TL + j) * 3 + 2] = z; } }
+for (let k = 0; k < NPART; k++) spawn(k, true);
+function flow(dt) { const w = live.w; if (!w || !streaks.visible) return; flowAcc += dt; const shift = flowAcc > .16; if (shift) flowAcc = 0; const gain = S.mode === 'wake' ? 1 : .55;
+  for (let k = 0; k < NPART; k++) { let x = pHead[k * 3], z = pHead[k * 3 + 1]; const h = pHead[k * 3 + 2], r = fieldAt(x, z, h), u = w.v * r * 20 * dt;
+    x += fX * u; z += fZ * u; if (x < TX0 || x > TX1 || z < TZ0 || z > TZ1) { spawn(k, false); continue; } pHead[k * 3] = x; pHead[k * 3 + 1] = z; const o = k * TL * 3;
+    if (shift) { trail.copyWithin(o + 3, o, o + (TL - 1) * 3); const c = r < .93 ? [1, .5, .16] : r > 1.035 ? [.45, .95, 1] : [.8, .88, 1]; pBase[k * 3] = c[0]; pBase[k * 3 + 1] = c[1]; pBase[k * 3 + 2] = c[2];
+      for (let j = 0; j < TL; j++) { const a = Math.pow(1 - j / (TL - 1), 1.6) * gain * (r < .93 ? 1.25 : .75); tcol[o + j * 3] = pBase[k * 3] * a; tcol[o + j * 3 + 1] = pBase[k * 3 + 1] * a; tcol[o + j * 3 + 2] = pBase[k * 3 + 2] * a; } }
+    trail[o] = x; trail[o + 1] = ground(x, z) + h; trail[o + 2] = z; }
+  flowGeo.attributes.position.needsUpdate = true; if (shift) flowGeo.attributes.color.needsUpdate = true; }
+// следы за роторами: полупрозрачные клинья по ширине модели Йенсена
+const plumeGeo = new THREE.BufferGeometry(); plumeGeo.setAttribute('position', new THREE.Float32BufferAttribute([-.5, 0, 0, .5, 0, 0, 1.4, 0, 1, -1.4, 0, 1], 3)); plumeGeo.setAttribute('color', new THREE.Float32BufferAttribute([1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0], 3)); plumeGeo.setIndex([0, 2, 1, 0, 3, 2]);
+const plumes = new THREE.InstancedMesh(plumeGeo, new THREE.MeshBasicMaterial({ vertexColors: true, transparent: true, opacity: .2, blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide, toneMapped: false }), N); plumes.frustumCulled = false; plumes.visible = false; scene.add(plumes);
+function posePlumes() { const c = new THREE.Color(); for (let i = 0; i < N; i++) { if (wK[i] === 0) { plumes.setMatrixAt(i, ZERO); continue; } dm.position.set(W.X[i], baseY[i] + T.hub, W.Z[i]); dm.rotation.set(0, Math.atan2(fX, fZ), 0); dm.scale.set(T.D, 1, 12 * T.D); dm.updateMatrix(); plumes.setMatrixAt(i, dm.matrix); const a = wK[i] / .55; plumes.setColorAt(i, c.setRGB(.55 * a, .8 * a, 1 * a)); }
+  dm.scale.set(1, 1, 1); dm.rotation.set(0, 0, 0); plumes.instanceMatrix.needsUpdate = true; if (plumes.instanceColor) plumes.instanceColor.needsUpdate = true; }
+
+/* вид внутрь гондолы выбранной ВЭУ: вал, подшипник, редуктор, генератор, преобразователь, трансформатор */
+const xr = new THREE.Group(); xr.visible = false; scene.add(xr); const xrParts = {};
+{ xr.add(new THREE.Mesh(nacGeo, new THREE.MeshPhysicalMaterial({ color: 0xbfe0ff, transparent: true, opacity: .16, roughness: .15, metalness: 0, depthWrite: false })));
+  const part = (id, geo, x, y, z) => { const m = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({ color: 0x62d6a0, roughness: .5, metalness: .4, emissive: 0x000000 })); m.position.set(x, y, z); xr.add(m); xrParts[id] = m; };
+  part('shaft', new THREE.CylinderGeometry(.5, .5, 5.2, 14).rotateX(Math.PI / 2), 0, .2, 3.2); part('bear', new THREE.CylinderGeometry(1.15, 1.15, .9, 20).rotateX(Math.PI / 2), 0, .2, 4.4);
+  part('gear', new THREE.BoxGeometry(3, 3, 3.2), 0, .2, .2); part('gen', new THREE.CylinderGeometry(1.4, 1.4, 3.1, 20).rotateX(Math.PI / 2), 0, .2, -3.3);
+  part('conv', new THREE.BoxGeometry(1.4, 2.4, 2.2), -1.25, 0, -6.4); part('trf', new THREE.BoxGeometry(1.6, 2.2, 2.2), 1.2, 0, -6.4); part('yaw', new THREE.CylinderGeometry(2.3, 2.3, .5, 24), 0, -2.3, 0); }
+const XR_TAG = [['bear', 'Главный подшипник', [0, 3.6, 4.4]], ['gear', 'Редуктор', [0, 4.6, .2]], ['gen', 'Генератор', [0, 3.6, -3.3]], ['conv', 'Преобразователь', [0, 3.2, -6.6]]];
+function temps(i) { const ld = pw[i] / T.rated, a = live.w.temp, ft = st[i] === 3 ? (faultText[i] || '') : '';
+  return { bear: a + 18 + 30 * ld + (/подшипник/.test(ft) ? 52 : 0), gear: a + 25 + 35 * ld, gen: a + 20 + 55 * ld + (/подшипник/.test(ft) ? 20 : 0), conv: a + 15 + 28 * ld + (/преобразовател/.test(ft) ? 48 : 0), trf: a + 22 + 40 * ld, shaft: a + 8 + 10 * ld, yaw: a + 5 }; }
+function poseXray() { Object.keys(labels).filter(k => k[0] === 'x').forEach(k => { labels[k].el.remove(); delete labels[k]; });
+  const on = S.stage === 'ops' && S.sel && S.sel.level === 'wtg'; xrI = on ? S.sel.i : -1; xr.visible = on; if (!on) return; const i = xrI, t = temps(i);
+  xr.position.set(W.X[i], baseY[i] + T.hub + 1.5, W.Z[i]); xr.rotation.set(0, yaw, 0); xr.updateMatrixWorld(true);
+  for (const k in xrParts) { const c = R_wake((t[k] - 25) / 85); xrParts[k].material.color.setRGB(c[0], c[1], c[2]); xrParts[k].material.emissive.setRGB(c[0] * .25, c[1] * .25, c[2] * .25); }
+  XR_TAG.forEach(([k, name, off], n) => { addLabel('x' + n, xr.localToWorld(new THREE.Vector3(...off)), `<b>${name}</b><span>${fmt(t[k])} °C</span>`, t[k] > 95 ? 'alert' : '', null, null); labels['x' + n].near = 900; }); }
 
 /* ═════════ раскраска и слои ═════════ */
 const ramp = stops => t => { t = Math.max(0, Math.min(1, t)) * (stops.length - 1); const i = Math.min(stops.length - 2, Math.floor(t)), f = t - i, a = stops[i], b = stops[i + 1]; return [a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f, a[2] + (b[2] - a[2]) * f]; };
@@ -210,11 +293,11 @@ function paintDots() {
   for (let i = 0; i < N; i++) { let c;
     if (S.stage === 'build') { const b = bState[i]; c = hex(S.bmode === 'stat' ? STAGE_COL[b.stage] : S.bmode === 'pf' ? (b.late > 45 ? 0xe5352f : b.late > 14 ? 0xf0784a : b.late > 0 ? 0xf5b544 : b.due && b.stage > 0 ? 0x62d6a0 : 0x4a443a) : (qcOpen.has(i) ? (qcOpen.get(i).sev === 'bad' ? 0xe5352f : 0xf5b544) : 0x4a443a)); }
     else if (S.mode === 'power') c = R_power(pw[i] / T.rated); else if (S.mode === 'wake') c = R_wake(def[i] / 0.22); else if (S.mode === 'elec') { const k = feederCol(W.feeder[i]); c = [k.r, k.g, k.b]; } else c = hex(ST_COL[st[i]]);
-    if (S.sel && S.stage !== 'cost') { const on = S.sel.level === 'wtg' ? S.sel.i === i : S.sel.level === 'feeder' ? W.feeder[i] === S.sel.f : true; if (!on) c = c.map(x => x * .35); else if (S.sel.level !== 'ss') c = c.map(x => Math.min(1, x * 1.25 + .15)); }
+    if (S.sel && S.stage !== 'cost') { const on = S.sel.level === 'wtg' ? S.sel.i === i : S.sel.level === 'feeder' ? W.feeder[i] === S.sel.f : true; if (!on) c = c.map(x => x * .35); else if (S.sel.level === 'wtg' || S.sel.level === 'feeder') c = c.map(x => Math.min(1, x * 1.25 + .15)); }
     dotCol.set(c, i * 3); }
   dotGeo.attributes.color.needsUpdate = true;
 }
-function layers() { if (!trenchG) return; const o = S.stage === 'ops'; trenchG.visible = o && S.mode === 'elec'; feederG.visible = o && S.mode === 'elec'; zoneG.visible = o && S.mode === 'zones'; streaks.visible = S.stage !== 'build' && (S.mode === 'wake' || S.mode === 'real' || S.mode === 'power') && !reduceMotion; cranes.visible = S.stage === 'build'; }
+function layers() { if (!trenchG) return; const o = S.stage === 'ops'; trenchG.visible = o && S.mode === 'elec'; feederG.visible = o && S.mode === 'elec'; zoneG.visible = o && S.mode === 'zones'; streaks.visible = S.stage !== 'build' && (S.mode === 'wake' || S.mode === 'real' || S.mode === 'power') && !reduceMotion; plumes.visible = o && S.mode === 'wake'; sldEl.style.display = o && S.mode === 'sld' ? '' : 'none'; if (o && S.mode === 'sld') renderSLD(); cranes.visible = S.stage === 'build'; }
 
 /* ═════════ мелкая графика ═════════ */
 function spark(vals, upto, dots) { const w = 150, h = 38, n = vals.length, mx = Math.max(...vals, 1e-6), pts = vals.map((x, i) => [+(i / (n - 1) * w).toFixed(1), +(h - 3 - x / mx * (h - 8)).toFixed(1)]), cut = Math.max(1, Math.min(n - 1, Math.round(upto * (n - 1)))), line = pts.slice(0, cut + 1).join(' ');
@@ -235,35 +318,54 @@ function events() {
   return ev.sort((a, b) => b.loss - a.loss);
 }
 const WO = ['Допуск', 'Диагностика', 'Ремонт', 'Проверка']; let evCache = [];
+/* частота сети и отклик накопителя, шаг 1 с: первичное регулирование по статизму 2 % с мёртвой зоной ±20 мГц
+   и вторичное — отработка команды центрального регулятора в диапазоне ±100 МВт. Сигнал частоты смоделирован. */
+const AGC = { f: 50, cmd: 0, act: 0, prim: 0, acc: 0, ev: 25, err: 0, hf: new Float32Array(180).fill(50), hc: new Float32Array(180), ha: new Float32Array(180) };
+function agcStep() {
+  const g = () => (Math.random() + Math.random() + Math.random() - 1.5) * 1.15; AGC.ev -= 1;
+  if (AGC.ev <= 0) { AGC.f -= (Math.random() < .7 ? 1 : -1) * (0.07 + Math.random() * 0.1); AGC.ev = 45 + Math.random() * 70; }
+  AGC.f += -(AGC.f - 50) * 0.06 + g() * 0.006; const df = AGC.f - 50, on = S.strat === 'agc' && S.stage === 'ops';
+  AGC.prim = Math.abs(df) > 0.02 ? -(df - Math.sign(df) * 0.02) * W.BESS.mw / (0.02 * 50) : 0;
+  AGC.cmd = Math.max(-100, Math.min(100, AGC.cmd * 0.985 - df * 14));
+  const target = on ? Math.max(-W.BESS.mw, Math.min(W.BESS.mw, AGC.prim + AGC.cmd)) : 0; AGC.act += (target - AGC.act) * 0.75; AGC.err = AGC.err * .95 + Math.abs(target - AGC.act) * .05;
+  for (const [h, x] of [[AGC.hf, AGC.f], [AGC.hc, on ? target : AGC.prim + AGC.cmd], [AGC.ha, AGC.act]]) { h.copyWithin(0, 1); h[h.length - 1] = x; }
+}
+function renderAgc() { const el = $('#agc'); if (!el) return; const on = S.strat === 'agc', n = AGC.hf.length, X = i => (i / (n - 1) * 300).toFixed(1);
+  const line = (h, lo, hi, y0, y1) => Array.from(h, (x, i) => `${X(i)},${(y1 - (Math.max(lo, Math.min(hi, x)) - lo) / (hi - lo) * (y1 - y0)).toFixed(1)}`).join(' ');
+  $('#agc-pill').className = 'pill ' + (on ? '' : 'off'); $('#agc-pill').lastElementChild.textContent = on ? 'СНЭ в регулировании' : 'СНЭ не участвует';
+  el.innerHTML = `<svg viewBox="0 0 300 96" style="display:block;width:100%;height:auto"><line x1="0" x2="300" y1="20" y2="20" stroke="rgba(255,255,255,.14)" stroke-dasharray="2 4"/><line x1="0" x2="300" y1="68" y2="68" stroke="rgba(255,255,255,.14)" stroke-dasharray="2 4"/>
+    <polyline points="${line(AGC.hf, 49.8, 50.2, 2, 38)}" fill="none" stroke="#7fd4ff" stroke-width="1.4"/><polyline points="${line(AGC.hc, -160, 160, 44, 92)}" fill="none" stroke="rgba(255,255,255,.55)" stroke-width="1.2" stroke-dasharray="3 3"/><polyline points="${line(AGC.ha, -160, 160, 44, 92)}" fill="none" stroke="#f5b544" stroke-width="1.6"/></svg>
+    <dl class="kv" style="margin-top:8px"><dt>Частота</dt><dd class="${Math.abs(AGC.f - 50) > .1 ? 'bad' : ''}">${fmt(AGC.f, 3)} Гц</dd><dt>${on ? 'Задание накопителю' : 'Требуется от регулирования'}</dt><dd>${(x => (x > 0 ? '+' : '−') + fmt(Math.abs(x)))(AGC.hc[n - 1])} МВт</dd><dt>Отработано</dt><dd>${(x => (x > 0 ? '+' : '−') + fmt(Math.abs(x)))(AGC.act)} МВт</dd></dl>
+    <p class="note">${on ? 'Плюс — выдача в сеть при просадке частоты, минус — заряд. Синяя линия — частота, пунктир — задание, жёлтая — отклик за последние три минуты.' : 'Чтобы накопитель отрабатывал отклонения частоты, выберите в сценарии режим «АРЧМ».'}</p>`; }
 function createOrder(key) { const e = evCache.find(x => x.key === key); if (!e || S.orders.find(o => o.key === key)) return; S.orders.push({ key, n: 4101 + S.orders.length + S.fixed, crew: (S.orders.length + S.fixed) % 4 + 1, step: 0, fix: e.fix }); refresh(); }
 function advanceOrder(key) { const o = S.orders.find(x => x.key === key); if (!o) return; if (++o.step >= 4) { o.fix(); S.orders = S.orders.filter(x => x !== o); S.fixed++; if (S.sel && selKey(S.sel) === key) S.sel = null; buildCurve(); } refresh(); }
 const selKey = s => s.level + ':' + (s.i ?? s.f ?? '');
 function renderOps() {
-  const L = live, k = Math.min(curve.length - 1, Math.round(S.min / 10)), u = S.min / 1440, grid = L.hv / 1000 - bess[k], nRun = st.filter(x => x === 0 || x === 5).length;
+  const L = live, k = Math.min(curve.length - 1, Math.round(S.min / 10)), u = S.min / 1440, grid = curve[k], nRun = st.filter(x => x === 0 || x === 5).length;
   $('#clock').textContent = hhmm(S.min);
   $('#r-tiles').innerHTML = `
     <div class="tile"><label>В сеть 220 кВ</label><div class="v">${fmt(grid, grid < 100 ? 1 : 0)}<small>МВт</small></div><div class="s">${fmt(grid / 10)} % от 1000 МВт</div><div class="viz">${spark(curve, u)}</div></div>
     <div class="tile"><label>За день</label><div class="v">${fmt(energyUntil(S.min) / 1000, 2)}<small>ГВт·ч</small></div><div class="s">к полуночи ${fmt(eDay / 1000, 2)}</div><div class="viz">${spark(curve.map((x, i) => energyUntil(i * 10)), u)}</div></div>
     <div class="tile"><label>Ветер на оси</label><div class="v">${fmt(L.w.v, 1)}<small>м/с</small></div><div class="s">${compass(L.w.dir)}, ${fmt(L.w.dir)}°</div><div class="viz">${spark(windC, u, true)}</div></div>
     <div class="tile"><label>В работе</label>${gauge(nRun / N * 100, String(nRun), 'из ' + N + ' ВЭУ')}</div>`;
-  $('#f-a').textContent = fmt(W.density(hMean + T.hub, L.w.temp), 3) + ' кг/м³'; $('#f-b').textContent = L.free > 1 ? fmt((1 - L.waked / L.free) * 100, 1) + ' %' : '—'; $('#f-c').textContent = `${fmt(soc[k] * 100)} %, ${bess[k] > 1 ? 'заряд ' + fmt(bess[k]) : bess[k] < -1 ? 'выдача ' + fmt(-bess[k]) : '0'} МВт`;
+  $('#f-a').textContent = fmt(W.density(hMean + T.hub, L.w.temp), 3) + ' кг/м³'; $('#f-b').textContent = L.free > 1 ? fmt((1 - L.waked / L.free) * 100, 1) + ' %' : '—'; $('#f-c').textContent = curt[k] > 0.5 ? fmt(curt[k]) + ' МВт' : 'нет';
   const pill = $('#st-pill'); pill.className = 'pill ' + (L.w.v >= T.cutOut ? 'bad' : L.act > 1 ? '' : 'off'); pill.lastElementChild.textContent = L.w.v >= T.cutOut ? 'Буря' : L.act > 1 ? 'В работе' : 'Штиль';
-  const o = W.ohl(Math.max(0, grid * 1000));
-  $('#ss-rows').innerHTML = `<button class="row" data-ss="1"><span class="n">Трансформаторы</span><span class="t">${W.EL.trafos} × ${W.EL.trafoMva} МВА</span><span class="p">${fmt(L.trLoad * 100)} <small>%</small></span><span class="bar"><i style="width:${Math.min(100, L.trLoad * 100)}%"></i></span></button>` +
-    o.lines.map(l => `<div class="row"><span class="n">${l.name.replace('ВЛ 220 кВ ', '')}</span><span class="t">${l.km} км</span><span class="p">${fmt(l.mw)} <small>МВт</small></span><span class="bar"><i style="width:${Math.min(100, l.mw / 4)}%"></i></span></div>`).join('') +
-    `<div class="row"><span class="n">Накопитель</span><span class="t">${W.EL.bessMwh} МВт·ч</span><span class="p">${fmt(soc[k] * 100)} <small>%</small></span><span class="bar"><i style="width:${soc[k] * 100}%"></i></span></div>`;
+  const nt = NETS[S.net][1], o = W.ohl(Math.max(0, grid * 1000), nt.line ?? -1), tmax = Math.max(...L.trLoad);
+  $('#ss-rows').innerHTML = `<button class="row w" data-ss="1"><span class="n">Трансформаторы ВЭС</span><span class="p">до ${fmt(tmax * 100)} <small>%</small></span><span class="quad">${L.trLoad.map((l, i) => `<span>Т${i + 1}${i === nt.tr ? ' откл.' : ' ' + fmt(l * 100) + ' %'}<span class="bar"><i style="width:${Math.min(100, l * 100)}%;${l > 1 ? 'background:var(--bad)' : ''}"></i></span></span>`).join('')}</span></button>` +
+    o.lines.map(l => `<div class="row"><span class="n">${l.name.replace('ВЛ 220 кВ ', '')}</span><span class="t">${l.km} км</span><span class="p">${l.out ? '<small>отключена</small>' : fmt(l.mw) + ' <small>МВт</small>'}</span><span class="bar"><i style="width:${Math.min(100, l.mw / 6)}%"></i></span></div>`).join('') +
+    `<button class="row" data-bess="1"><span class="n">Накопитель</span><span class="t">${bess[k] > 1 ? 'заряд' : bess[k] < -1 ? 'выдача' : 'ждёт'}</span><span class="p">${fmt(Math.abs(bess[k]))} <small>МВт</small></span><span class="bar"><i style="width:${soc[k] * 100}%"></i></span></button>`;
   evCache = events(); $('#ev-pill').lastElementChild.textContent = evCache.length;
   $('#ev-rows').innerHTML = (evCache.length ? evCache.map(e => { const od = S.orders.find(x => x.key === e.key);
     return `<div class="ev ${e.sev}" data-ev="${e.key}"><i class="dot"></i><b>${e.title}</b><em>${e.loss > 1 ? '−' + pwf(e.loss) : ''}</em><span>${e.sub}</span>${od ? `<div class="wo"><small>Наряд ${od.n}, бригада ${od.crew}</small><div class="segs">${WO.map((_, i) => `<i class="${i < od.step ? 'on' : ''}"></i>`).join('')}</div><button class="mini go" data-adv="${e.key}">${WO[od.step]} ✓</button></div>` : `<div class="wo"><small></small><button class="mini" data-new="${e.key}">Создать наряд</button></div>`}</div>`; }).join('') : `<p class="empty">Все ветроустановки и фидеры в работе.</p>`) + (S.fixed ? `<p class="empty" style="margin-top:4px">Устранено за сессию: ${S.fixed}.</p>` : '');
   const down = Math.max(0, L.waked - L.act), el = L.mv + L.tr;
-  $('#side').innerHTML = `<div class="card-head"><h2>Куда уходит мощность</h2></div>` + (L.free > 50 ? ring([['В сеть', L.hv, '#f5b544'], ['Следы ВЭУ', L.free - L.waked, '#7fb6ff'], ['Простои', down, '#ff6452'], ['Кабели и ПС', el, '#b5367a']], fmt(L.hv / L.free * 100) + ' %', 'в сеть') : `<p class="empty">${L.w.v >= T.cutOut ? 'Ветер сильнее 25 м/с: ветроустановки остановлены и развёрнуты лопастями по потоку.' : 'Ветер слабее 3 м/с: роторы не вращаются.'}</p>`);
-  drawTimeline(); alertLabels();
+  $('#side').innerHTML = `<div class="card-head"><h2>Куда уходит мощность</h2></div>` + (L.free > 50 ? ring([['Полезно', Math.max(0, L.hv - curt[k] * 1000), '#f5b544'], ['Следы ВЭУ', L.free - L.waked, '#7fb6ff'], ['Простои', down, '#ff6452'], ['Кабели и ПС', el + (L.over || 0), '#b5367a'], ['Срезано', curt[k] * 1000, '#8d95a8']], fmt(Math.max(0, L.hv - curt[k] * 1000) / L.free * 100) + ' %', 'полезно') : `<p class="empty">${L.w.v >= T.cutOut ? 'Ветер сильнее 25 м/с: ветроустановки остановлены и развёрнуты лопастями по потоку.' : 'Ветер слабее 3 м/с: роторы не вращаются.'}</p>`);
+  drawTimeline(); alertLabels(); renderAgc();
 }
 function drawTimeline() {
   const pt = (x, i, P, n) => `${(i / n * 1000).toFixed(1)},${(100 - Math.min(x, P) / P * 94).toFixed(1)}`;
   if (S.stage === 'ops') { const P = 1050, n = curve.length - 1, d = 'M' + curve.map((x, i) => pt(x, i, P, n)).join('L'), k = Math.floor(S.min / 10), f = curve.slice(0, k + 1).map((x, i) => pt(x, i, P, n)).join('L');
     $('#c-plan').setAttribute('d', ''); $('#c-fc').setAttribute('d', ''); $('#c-ghost').setAttribute('d', d + 'L1000,100L0,100Z'); $('#c-line').setAttribute('d', 'M' + f); $('#c-area').setAttribute('d', 'M0,100L' + f + `L${(k / n * 1000).toFixed(1)},100Z`);
-    const x = S.min / 1440 * 1000; $('#c-cur').setAttribute('x1', x); $('#c-cur').setAttribute('x2', x); }
+    $('#c-plan').setAttribute('d', 'M' + windHv.map((x, i) => pt(x, i, P, n)).join('L')); const x = S.min / 1440 * 1000; $('#c-cur').setAttribute('x1', x); $('#c-cur').setAttribute('x2', x); }
   else if (S.stage === 'build') { const n = E.MAXD, D = Math.round(S.bday), f = E.curveFact.slice(0, D + 1).map((x, i) => pt(x, i, 1, n)).join('L');
     $('#c-plan').setAttribute('d', 'M' + E.curvePlan.map((x, i) => pt(x, i, 1, n)).join('L')); $('#c-ghost').setAttribute('d', ''); $('#c-line').setAttribute('d', 'M' + f); $('#c-area').setAttribute('d', 'M0,100L' + f + `L${(D / n * 1000).toFixed(1)},100Z`);
     $('#c-fc').setAttribute('d', bm.ev < .9995 ? `M${pt(bm.ev, D, 1, n)}L${pt(1, Math.min(n, bm.forecast), 1, n)}` : ''); const x = D / n * 1000; $('#c-cur').setAttribute('x1', x); $('#c-cur').setAttribute('x2', x); }
@@ -321,11 +423,31 @@ function renderCost() {
 }
 const FIELDS = [['capex', 'Стоимость проекта, млн $'], ['tariff', 'Тариф, центов за кВт·ч'], ['opex', 'Эксплуатация, % в год'], ['rate', 'Ставка дисконта, %'], ['years', 'Срок, лет'], ['avail', 'Готовность ВЭУ, %']];
 
+/* однолинейная схема: ВЛ 220 кВ → две системы шин → шесть трансформаторов → секции 35 кВ → ветропарк и накопитель */
+const sldEl = document.createElement('section'); sldEl.id = 'sld'; sldEl.className = 'card glass'; sldEl.style.display = 'none'; $('#left').appendChild(sldEl);
+function renderSLD() {
+  const nt = NETS[S.net][1], k = Math.min(curve.length - 1, Math.round(S.min / 10)), o = W.ohl(Math.max(0, curve[k] * 1000), nt.line ?? -1), L = live, ON = '#f5b544', OFF = '#5d6474', BAD = '#ff6452', B = W.BESS;
+  const sec = []; { let f = 0; W.EL.sections.forEach(n => { let p = 0; for (let q = 0; q < n; q++, f++) p += L.fP ? L.fP[f] : 0; sec.push([n, p / 1000]); }); }
+  const cb = (x, y, on) => `<rect x="${x - 4}" y="${y - 4}" width="8" height="8" fill="${on ? ON : 'none'}" stroke="${on ? ON : OFF}" stroke-width="1.4"/>`, tx = (x, y, t, c = '#f2f4f8', a = 'middle', sz = 10) => `<text x="${x}" y="${y}" text-anchor="${a}" style="font:${sz}px var(--body);fill:${c}">${t}</text>`;
+  let h = `<line x1="40" x2="680" y1="96" y2="96" stroke="${ON}" stroke-width="3"/><line x1="40" x2="680" y1="108" y2="108" stroke="${ON}" stroke-width="3"/>${tx(36, 100, '220 кВ', '#a0a9bb', 'end', 9)}${cb(672, 102, true)}`;
+  o.lines.forEach((l, i) => { const x = 150 + i * 190, c = l.out ? OFF : ON; h += tx(x, 16, l.name.replace('ВЛ 220 кВ ', '')) + tx(x, 30, l.out ? 'отключена' : `${fmt(l.mw)} МВт, ${fmt(l.amp)} А`, l.out ? '#717a8d' : '#a0a9bb', 'middle', 9.5);
+    for (const d of [-14, 14]) h += `<line x1="${x + d}" x2="${x + d}" y1="38" y2="${d < 0 ? 96 : 108}" stroke="${c}" stroke-width="1.6" ${l.out ? 'stroke-dasharray="4 4"' : ''}/>` + cb(x + d, 66, !l.out); });
+  for (let t = 0; t < 6; t++) { const x = 95 + t * 106, wpp = t < 4, off = wpp && t === nt.tr, ld = wpp ? L.trLoad[t] : Math.abs(bess[k]) / 2 / (B.trafoMva * .98), c = off ? OFF : ld > 1 ? BAD : ON;
+    h += `<line x1="${x}" x2="${x}" y1="${t % 2 ? 108 : 96}" y2="150" stroke="${c}" stroke-width="1.6" ${off ? 'stroke-dasharray="4 4"' : ''}/>${cb(x, 128, !off)}<circle cx="${x}" cy="160" r="10" fill="none" stroke="${c}" stroke-width="1.6"/><circle cx="${x}" cy="174" r="10" fill="none" stroke="${c}" stroke-width="1.6"/>` + tx(x + 16, 162, 'Т' + (t + 1), '#f2f4f8', 'start') + tx(x + 16, 175, off ? 'откл.' : fmt(ld * 100) + ' %', ld > 1 ? BAD : '#a0a9bb', 'start', 9.5);
+    h += `<line x1="${x}" x2="${x}" y1="184" y2="212" stroke="${c}" stroke-width="1.6"/>`;
+    for (const sgn of [0, 1]) { const x0 = x - 44 + sgn * 46, sc = wpp ? sec[t * 2 + sgn] : [4, Math.abs(bess[k]) / 4]; h += `<line x1="${x0}" x2="${x0 + 42}" y1="212" y2="212" stroke="${wpp ? ON : '#7fb6ff'}" stroke-width="3"/>` + tx(x0 + 21, 226, `${sc[0]} фид.`, '#a0a9bb', 'middle', 9) + tx(x0 + 21, 238, fmt(sc[1]) + ' МВт', '#f2f4f8', 'middle', 9.5) + `<line x1="${x0 + 21}" x2="${x0 + 21}" y1="244" y2="266" stroke="${wpp ? ON : '#7fb6ff'}" stroke-width="1.2"/>`; } }
+  h += tx(36, 216, '35 кВ', '#a0a9bb', 'end', 9) + `<rect x="46" y="266" width="424" height="52" rx="10" fill="rgba(245,181,68,.10)" stroke="${ON}"/>` + tx(258, 288, `Ветропарк: ${st.filter(x => x === 0 || x === 5).length} из ${N} ВЭУ в работе, ${fmt(L.act / 1000)} МВт`, '#f2f4f8', 'middle', 11) + tx(258, 305, `${W.NF} фидеров 35 кВ, компенсация 16 × 41 МВАр`, '#a0a9bb', 'middle', 9.5);
+  h += `<rect x="476" y="266" width="204" height="52" rx="10" fill="rgba(127,182,255,.10)" stroke="#7fb6ff"/>` + tx(578, 288, `Накопитель: ${bess[k] > 1 ? 'заряд' : bess[k] < -1 ? 'выдача' : 'ждёт'} ${fmt(Math.abs(bess[k]))} МВт`, '#f2f4f8', 'middle', 11) + tx(578, 305, `заряд ${fmt(soc[k] * 100)} %, компенсация 4 × 36 МВАр`, '#a0a9bb', 'middle', 9.5);
+  sldEl.innerHTML = `<div class="card-head"><h2>Однолинейная схема подстанции</h2><span class="pill ${nt.tr != null || nt.line != null ? 'warn' : ''}"><i></i><span>${NETS[S.net][0]}</span></span></div><svg viewBox="0 0 720 326" style="display:block;width:100%;height:auto">${h}</svg>`;
+}
+
 /* ═════════ правая колонка, режимы ═════════ */
 const RIGHT = {
   ops: `<section class="card glass"><div class="card-head"><h2>Станция сейчас</h2><span class="pill" id="st-pill"><i></i><span>В работе</span></span></div><div class="tiles" id="r-tiles"></div>
-      <dl class="kv sep"><dt>Плотность воздуха</dt><dd id="f-a"></dd><dt>Потери в следах</dt><dd id="f-b"></dd><dt>Накопитель</dt><dd id="f-c"></dd></dl></section>
-    <section class="card glass"><div class="card-head"><h2>Подстанция и линии</h2><span class="pill off"><span>220/33 кВ</span></span></div><div class="rows" id="ss-rows"></div></section>
+      <dl class="kv sep"><dt>Плотность воздуха</dt><dd id="f-a"></dd><dt>Потери в следах</dt><dd id="f-b"></dd><dt>Срезано ограничением сети</dt><dd id="f-c"></dd></dl></section>
+    <section class="card glass"><div class="card-head"><h2>Сценарий</h2></div><div class="fin sc"><label>Погода<select id="sc-day">${Object.entries(W.DAYS).map(([k, d]) => `<option value="${k}">${d[0]}</option>`).join('')}</select></label><label>Сеть<select id="sc-net">${Object.entries(NETS).map(([k, d]) => `<option value="${k}">${d[0]}</option>`).join('')}</select></label><label>Накопитель<select id="sc-strat">${Object.entries(STRATS).map(([k, d]) => `<option value="${k}">${d}</option>`).join('')}</select></label></div></section>
+    <section class="card glass"><div class="card-head"><h2>Частота и АРЧМ</h2><span class="pill off" id="agc-pill"><i></i><span></span></span></div><div id="agc"></div></section>
+    <section class="card glass"><div class="card-head"><h2>Подстанция и линии</h2><span class="pill off"><span>220/35 кВ</span></span></div><div class="rows" id="ss-rows"></div></section>
     <section class="card glass"><div class="card-head"><h2>Что теряет мощность</h2><span class="pill warn" id="ev-pill"><i></i><span>0</span></span></div><div class="rows" id="ev-rows"></div></section><p class="foot" id="src"></p>`,
   build: `<section class="card glass"><div class="card-head"><h2>Стройка на дату</h2><span class="pill off"><span>NTP июль 2026</span></span></div><div class="tiles" id="r-tiles"></div></section>
     <section class="card glass"><div class="card-head"><h2>Требует решения</h2><span class="pill" id="b-pill"><i></i><span>0</span></span></div><div class="rows" id="b-alerts"></div></section>
@@ -334,20 +456,20 @@ const RIGHT = {
   cost: `<section class="card glass"><div class="card-head"><h2>Экономика проекта</h2><span class="pill off"><span>1000 МВт</span></span></div><div class="tiles" id="r-tiles"></div></section>
     <section class="card glass"><div class="card-head"><h2>Допущения</h2><button class="mini" id="fin-reset">Сбросить</button></div><div class="fin" id="c-fin"></div></section>
     <section class="card glass"><div class="card-head"><h2>Выработка, ГВт·ч в год</h2></div><table class="boq" id="c-aep"><tbody></tbody></table></section>
-    <section class="card glass"><div class="card-head"><h2>Ведомость объёмов</h2><span class="pill off"><span>BOP</span></span></div><table class="boq"><tbody>${E.BOQ.map(r => `<tr><td>${r[0]}</td><td>${fmt(r[1], r[1] % 1 ? (r[1] < 20 ? 2 : 1) : 0)} ${r[2]}</td></tr>`).join('')}</tbody></table></section><p class="foot" id="src"></p>`
+    <section class="card glass"><div class="card-head"><h2>Ведомость объёмов</h2><span class="pill off"><span>BOP и ПС</span></span></div><table class="boq"><tbody>${E.BOQ.map(r => `<tr><td>${r[0]}</td><td>${fmt(r[1], r[1] % 1 ? (r[1] < 20 ? 2 : 1) : 0)} ${r[2]}</td></tr>`).join('')}</tbody></table></section><p class="foot" id="src"></p>`
 };
-const MODES = { ops: [['real', 'Вид'], ['power', 'Мощность'], ['wake', 'Следы'], ['elec', 'Сеть 33 кВ'], ['zones', 'Ограничения']], build: [['stat', 'Ход работ'], ['pf', 'План и факт'], ['qc', 'Замечания']], cost: [] };
+const MODES = { ops: [['real', 'Вид'], ['power', 'Мощность'], ['wake', 'Ветер и следы'], ['elec', 'Сеть 35 кВ'], ['sld', 'Схема ПС'], ['zones', 'Ограничения']], build: [['stat', 'Ход работ'], ['pf', 'План и факт'], ['qc', 'Замечания']], cost: [] };
 const VIEWS = { ops: [[-6500, 4000, 13500], [-300, 0, 1500]], build: [[-9000, 9000, 15500], [0, 0, 500]], cost: [[-2000, 26000, 21000], [0, 0, 500]] };
 function setSrc() { const el = $('#src'); if (!el) return; const map = S.terrain && S.terrain.demOk ? 'Рельеф — открытые данные высот (Terrain Tiles), снимок — Esri World Imagery.' : 'Рельеф условный.';
-  el.textContent = (S.stage === 'ops' ? 'Координаты ВЭУ, дороги и кабельные траншеи взяты из KMZ проекта. Ветер, модель ВЭУ и отказы — расчётные допущения, это не данные SCADA. ' : S.stage === 'build' ? 'План привязан к вехам RFP, объёмы — из ведомости BOP. Фактический ход работ — демонстрационный сценарий. ' : 'Стоимость и тариф — из справки по проекту. Роза ветров и модель ВЭУ — допущения: ветрового отчёта в папке нет. ') + map; }
+  el.textContent = (S.stage === 'ops' ? 'ВЭУ, дороги и траншеи — из KMZ проекта; подстанция — из ведомости HV-AIS; накопитель — из отчёта и чертежей СНЭ. Ветер, кривая мощности и отказы — допущения, это не данные SCADA. ' : S.stage === 'build' ? 'План привязан к вехам RFP, объёмы — из ведомости BOP. Фактический ход работ — демонстрационный сценарий. ' : 'Стоимость и тариф — из справки по проекту, подстанция — из оценённой ведомости. Роза ветров и кривая мощности — допущения: ветрового отчёта в папке нет. ') + map; }
 function setStage(s, fly = true) {
   S.stage = s; S.sel = null; S.playing = false; $('#play-ic').setAttribute('d', 'M4 2.5v11l9-5.5z');
   $$('#tabs button').forEach(b => b.setAttribute('aria-pressed', b.dataset.stage === s)); $('#right').innerHTML = RIGHT[s];
   $('#modes').innerHTML = MODES[s].map(m => `<button data-mode="${m[0]}" aria-pressed="${m[0] === (s === 'ops' ? S.mode : S.bmode)}">${m[1]}</button>`).join('');
-  $('#clockbox').innerHTML = `<span class="num" id="clock"></span>` + (s === 'ops' ? `<select id="daysel" aria-label="Погода">${Object.entries(W.DAYS).map(([k, d]) => `<option value="${k}">${d[0]}</option>`).join('')}</select>` : '');
-  if (s === 'ops') { const sel = $('#daysel'); sel.value = S.day; sel.onchange = e => { S.day = e.target.value; buildCurve(); refresh(); }; }
+  $('#clockbox').innerHTML = `<span class="num" id="clock"></span>`;
+  if (s === 'ops') { $('#sc-day').value = S.day; $('#sc-net').value = S.net; $('#sc-strat').value = S.strat; }
   const tl = s !== 'cost'; for (const q of ['#tl-ctl', '#tl-chart', '#axis']) $(q).hidden = !tl; $('#bars').hidden = tl; const t = $('#t');
-  if (s === 'ops') { t.min = 0; t.max = 1435; t.step = 5; t.value = S.min; $('#now').textContent = 'Полдень'; $('#cap').innerHTML = 'Выдача в сеть за сутки, до 1000 МВт'; $('#axis').innerHTML = ['00:00', '06:00', '12:00', '18:00', '24:00'].map((x, i) => `<span style="left:${i * 25}%">${x}</span>`).join(''); }
+  if (s === 'ops') { t.min = 0; t.max = 1435; t.step = 5; t.value = S.min; $('#now').textContent = 'Полдень'; $('#cap').innerHTML = '<span><i></i>ветропарк</span><span><i style="background:#f5b544"></i>в сеть с учётом накопителя и ограничений, до 1000 МВт</span>'; $('#axis').innerHTML = ['00:00', '06:00', '12:00', '18:00', '24:00'].map((x, i) => `<span style="left:${i * 25}%">${x}</span>`).join(''); }
   if (s === 'build') { t.min = 0; t.max = E.MAXD; t.step = 1; t.value = S.bday; $('#now').textContent = 'Финиш'; $('#cap').innerHTML = '<span><i></i>план</span><span><i style="background:#f5b544"></i>факт и прогноз</span>';
     const st = $('#tl-chart').clientWidth < 520 ? 200 : 100; let h = ''; for (let d = 0; d <= E.MAXD - (st > 100 ? 100 : 0); d += st) h += `<span style="left:${d / E.MAXD * 100}%">${E.dateOf(d).toLocaleDateString('ru-RU', { month: 'short', year: '2-digit', timeZone: 'UTC' }).replace(' г.', '').replace('.', '')}</span>`; $('#axis').innerHTML = h; }
   if (s === 'cost') $('#c-fin').innerHTML = FIELDS.map(([k, l]) => `<label>${l}<input type="number" step="any" data-k="${k}" value="${S.econ[k] ?? E.ECON[k]}"></label>`).join('');
@@ -356,7 +478,7 @@ function setStage(s, fly = true) {
 function refresh() {
   if (S.stage === 'build') { applyBuild(); live = { ...compute(720), night: false }; applySun(690); }
   else { live = { ...live, ...compute(S.stage === 'cost' ? 780 : S.min) }; applySun(S.stage === 'cost' ? 780 : S.min); }
-  yaw = Math.atan2(Math.sin(live.w.dir * RAD), -Math.cos(live.w.dir * RAD)); poseStatic(); paintDots(); layers();
+  yaw = Math.atan2(Math.sin(live.w.dir * RAD), -Math.cos(live.w.dir * RAD)); poseStatic(); windField(); posePlumes(); paintDots(); layers(); poseXray();
   S.stage === 'ops' ? renderOps() : S.stage === 'build' ? renderBuild() : renderCost(); renderInspector(); renderLegend(); markSel(); insets();
 }
 $('#tabs').addEventListener('click', e => { const b = e.target.closest('button'); if (b && b.dataset.stage !== S.stage) setStage(b.dataset.stage); });
@@ -365,9 +487,10 @@ $('#right').addEventListener('click', e => {
   const nw = e.target.closest('[data-new]'), adv = e.target.closest('[data-adv]'), ev = e.target.closest('[data-ev]'), ww = e.target.closest('[data-w]'), ss = e.target.closest('[data-ss]');
   if (nw) return createOrder(nw.dataset.new); if (adv) return advanceOrder(adv.dataset.adv);
   if (ev) { const x = evCache.find(q => q.key === ev.dataset.ev); if (x) select(x.sel, true); return; }
-  if (ww) return select({ level: 'wtg', i: +ww.dataset.w }, true); if (ss) return select({ level: 'ss' }, true);
+  if (ww) return select({ level: 'wtg', i: +ww.dataset.w }, true); if (ss) return select({ level: 'ss' }, true); if (e.target.closest('[data-bess]')) return select({ level: 'bess' }, true);
   if (e.target.id === 'fin-reset') { S.econ = {}; setStage('cost', false); }
 });
+$('#right').addEventListener('change', e => { const m = { 'sc-day': 'day', 'sc-net': 'net', 'sc-strat': 'strat' }[e.target.id]; if (!m) return; S[m] = e.target.value; buildCurve(); refresh(); });
 $('#right').addEventListener('input', e => { const i = e.target.closest('input[data-k]'); if (!i) return; const x = parseFloat(i.value); if (Number.isFinite(x)) { S.econ[i.dataset.k] = x; renderCost(); } });
 
 /* ═════════ карточка объекта ═════════ */
@@ -375,32 +498,37 @@ const X_BTN = '<button class="x" data-act="clear" aria-label="Закрыть"><s
 function renderInspector() {
   const el = $('#insp'), s = S.sel; if (S.stage === 'cost' || !s) { el.style.display = 'none'; return; } el.style.display = '';
   const kv = rows => `<dl class="kv">${rows.map(r => `<dt>${r[0]}</dt><dd class="${r[2] || ''}">${r[1]}</dd>`).join('')}</dl>`;
-  if (s.level === 'ss') { const c = W.collect(pw, tripped), o = W.ohl(c.hv);
-    el.innerHTML = `<div class="card-head"><span class="pill"><i></i><span>В работе</span></span>${X_BTN}</div><h3 class="insp-title">Подстанция 220/33 кВ</h3><div class="insp-sub">Точка учёта на стороне 220 кВ</div><div class="big"><b>${pwf(c.hv)}</b><span>на шинах 220 кВ</span></div>` +
-      kv([['Фидеров 33 кВ в работе', `${W.NF - tripped.reduce((a, b) => a + b, 0)} из ${W.NF}`], ['Загрузка трансформаторов', fmt(c.trLoad * 100) + ' %'], ['Потери в кабелях 33 кВ', pwf(c.mvLoss)], ['Потери в трансформаторах', pwf(c.trLoss)], ['Потери в ВЛ за точкой учёта', pwf(o.loss)], ['Накопитель', `${W.EL.bessMw} МВт, ${W.EL.bessMwh} МВт·ч`]]) + `<div class="insp-actions"><button class="btn" data-act="fly">Показать в сцене</button></div>`; return; }
+  const kq = Math.min(curve.length - 1, Math.round(S.min / 10));
+  if (s.level === 'ss') { const nt = NETS[S.net][1], c = W.collect(pw, tripped, nt.tr ?? -1), o = W.ohl(Math.max(0, curve[kq] * 1000), nt.line ?? -1), A = W.EL;
+    el.innerHTML = `<div class="card-head"><span class="pill ${nt.tr != null || nt.line != null ? 'warn' : ''}"><i></i><span>${nt.tr != null || nt.line != null ? 'Ремонтная схема' : 'В работе'}</span></span>${X_BTN}</div><h3 class="insp-title">Подстанция 220/35 кВ</h3><div class="insp-sub">Точка учёта на стороне 220 кВ. Состав — по ведомости подстанции</div><div class="big"><b>${pwf(c.hv)}</b><span>от ветропарка на шинах 220 кВ</span></div>` +
+      kv([['Трансформаторы ВЭС', `${A.trafos} × ${A.trafoMva} МВА`], ['Их загрузка', c.trLoad.map((l, i) => i === nt.tr ? 'откл.' : fmt(l * 100)).join(' / ') + ' %', Math.max(...c.trLoad) > 1 ? 'bad' : ''], ['Трансформаторы СНЭ', `${W.BESS.trafos} × ${W.BESS.trafoMva} МВА`], ['ОРУ 220 кВ', `${A.ais.bays} ячеек, две системы шин`], ['Фидеры 35 кВ', `${W.NF - tripped.reduce((a, b) => a + b, 0)} из ${W.NF} ВЭС, ${W.BESS.feeders} СНЭ`], ['Компенсация', `${A.svg.n} установок, ${A.svg.mvar} МВАр`], ['Потери в кабелях 35 кВ', pwf(c.mvLoss)], ['Потери в трансформаторах', pwf(c.trLoss)], ['Потери в ВЛ за точкой учёта', pwf(o.loss)], ['Оценка поставки и наладки', fmt(A.ssCost, 1) + ' млн $']]) + `<div class="insp-actions"><button class="btn" data-act="fly">Показать в сцене</button></div>`; return; }
+  if (s.level === 'bess') { const B = W.BESS, p = S.stage === 'ops' ? bess[kq] : 0, so = S.stage === 'ops' ? soc[kq] : 0.5, caps = Array.from({ length: 26 }, (_, y) => B.capacity(y) - 560);
+    el.innerHTML = `<div class="card-head"><span class="pill ${Math.abs(p) > 1 ? '' : 'off'}"><i></i><span>${p > 1 ? 'Заряд' : p < -1 ? 'Выдача' : 'Ожидание'}</span></span>${X_BTN}</div><h3 class="insp-title">Накопитель энергии</h3><div class="insp-sub">${B.mw} МВт / ${B.mwh} МВт·ч, 35 кВ. Состав — по отчёту и схеме СНЭ</div><div class="big"><b>${fmt(Math.abs(p))} МВт</b><span>заряд ${fmt(so * 100)} %, ${fmt(so * bCap)} МВт·ч</span></div>` +
+      kv([['Режим', STRATS[S.strat]], ['Батарейные контейнеры', `${B.encl} по ${fmt(B.q * 1000)} кВт·ч`], ['Преобразовательные станции', `70 по 5,5 МВА и одна 2,75`], ['Кольца 35 кВ', `${B.loops} по три станции, ${B.feeders} фидеров`], ['Трансформаторы', `${B.trafos} × 330/165/165 МВА`], ['Собственные нужды', fmt(Math.abs(p) > 1 ? B.auxOp : B.auxSb, 2) + ' МВт'], ['Полезная ёмкость, 1-й год', fmt(bCap) + ' МВт·ч'], ['На 25-й год', fmt(B.capacity(25)) + ' МВт·ч, ' + B.count(25) + ' конт.']]) +
+      `<div style="margin-top:10px">${spark(caps, 1 / 25)}</div><p class="note">Полезная ёмкость за 25 лет: батареи стареют, на 5, 10, 15 и 20-й год добавляют по 12 контейнеров, поэтому ёмкость не опускается ниже 600 МВт·ч.</p><div class="insp-actions"><button class="btn" data-act="fly">Показать в сцене</button></div>`; return; }
   if (S.stage === 'build') { const i = s.i, b = bState[i], D = S.bday, obs = bm.open.filter(q => q.i === i);
-    el.innerHTML = `<div class="card-head"><span class="pill ${b.late > 14 ? 'bad' : b.late > 0 ? 'warn' : ''}"><i></i><span>${b.late > 0 ? 'отстаёт на ' + fmt(b.late) + ' дн.' : 'по графику'}</span></span>${X_BTN}</div><h3 class="insp-title">${wName(i)}</h3><div class="insp-sub">${E.STAGE[b.stage]}. Фидер ${W.feeder[i] + 1}</div>
+    el.innerHTML = `<div class="card-head"><span class="pill ${b.late > 14 ? 'bad' : b.late > 0 ? 'warn' : ''}"><i></i><span>${b.late > 0 ? 'отстаёт на ' + fmt(b.late) + ' дн.' : 'по графику'}</span></span>${X_BTN}</div><h3 class="insp-title">${wName(i)}</h3><div class="insp-sub">${E.STAGE[b.stage]}. Фидер ${W.feeder[i] + 1}. Фундамент Ø26 м: 680 м³ бетона, 82 т арматуры</div>
       <div class="steps" style="border:0;padding:0;margin:0">${E.steps(i).map(x => { const done = D >= x.fact, now = !done && D >= x.start, late = Math.round((done ? x.fact : D) - x.plan);
         return `<div class="step ${done ? 'done' : now ? 'now' : ''}"><i></i><span>${x.name}</span><em>${done ? fdate(E.dateOf(x.fact)) : now ? 'в работе' : 'план ' + fdate(E.dateOf(x.plan))}</em>${late > 0 && (done || D > x.plan) ? `<small class="bad">${done ? 'сдано на' : 'просрочено на'} ${fmt(late)} дн. позже плана</small>` : done ? `<small>в срок</small>` : ''}</div>`; }).join('')}</div>
       ${obs.length ? `<div class="rows" style="margin-top:12px">${obs.map(q => `<div class="ev ${q.sev}"><i class="dot"></i><b>Замечание ${q.n}</b><em>${fmt(D - q.found)} дн.</em><span>${q.text}</span></div>`).join('')}</div>` : ''}<div class="insp-actions"><button class="btn" data-act="fly">Показать в сцене</button></div>`; return; }
-  const seg = `<div class="seg">${[['wtg', 'Ветроустановка'], ['feeder', 'Фидер 33 кВ']].map(l => `<button data-level="${l[0]}" aria-pressed="${s.level === l[0]}">${l[1]}</button>`).join('')}</div>`, key = selKey(s), ev = evCache.find(x => x.key === key), od = S.orders.find(o => o.key === key);
+  const seg = `<div class="seg">${[['wtg', 'Ветроустановка'], ['feeder', 'Фидер 35 кВ']].map(l => `<button data-level="${l[0]}" aria-pressed="${s.level === l[0]}">${l[1]}</button>`).join('')}</div>`, key = selKey(s), ev = evCache.find(x => x.key === key), od = S.orders.find(o => o.key === key);
   const act = `<div class="insp-actions">${ev ? (od ? `<button class="btn go" data-adv="${key}">Наряд ${od.n}: ${WO[od.step].toLowerCase()} ✓</button>` : `<button class="btn go" data-new="${key}">Создать наряд бригаде</button>`) : ''}<button class="btn" data-act="fly">Показать в сцене</button></div>`;
   if (s.level === 'wtg') { const i = s.i, dv = pExp[i] > 1 ? (pw[i] / pExp[i] - 1) * 100 : NaN;
-    el.innerHTML = `<div class="card-head"><span class="pill ${st[i] === 3 || st[i] === 6 ? 'bad' : st[i] ? 'warn' : ''}"><i></i><span>${ST_NAME[st[i]]}</span></span>${X_BTN}</div>${seg}<h3 class="insp-title">${wName(i)}</h3><div class="insp-sub">${fmt(T.rated / 1000, 2)} МВт, ротор ${T.D} м, ось ${T.hub} м. ${faultText[i] && st[i] ? faultText[i] : 'Фидер ' + (W.feeder[i] + 1)}</div>
+    el.innerHTML = `<div class="card-head"><span class="pill ${st[i] === 3 || st[i] === 6 ? 'bad' : st[i] ? 'warn' : ''}"><i></i><span>${ST_NAME[st[i]]}</span></span>${X_BTN}</div>${seg}<h3 class="insp-title">${wName(i)}</h3><div class="insp-sub">${fmt(T.rated / 1000, 2)} МВт, ротор ${T.D} м, ось ${T.hub} м. ${faultText[i] && st[i] ? faultText[i] : 'Фидер ' + (W.feeder[i] + 1) + ', трансформатор Т' + (W.feederTr[W.feeder[i]] + 1)}</div>
       <div class="big"><b>${pwf(pw[i])}</b>${Number.isNaN(dv) ? '' : `<span class="${dv < -15 ? 'bad' : dv < -3 ? 'warn' : 'ok'}">${dv < -0.5 ? '↓ ' + fmt(-dv) + ' % к расчёту' : 'в норме'}</span>`}</div>` +
-      kv([['Ветер на роторе', fmt(v[i], 1) + ' м/с'], ['Потеря скорости в следе', fmt(def[i] * 100, 1) + ' %', def[i] > .12 ? 'bad' : ''], ['Обороты ротора', fmt(rpm[i] < 1 ? 0 : rpm[i], 1) + ' об/мин'], ['Угол лопастей', fmt(run[i] ? W.pitch(v[i], rho[i]) : 88) + '°'], ['Курс гондолы', `${compass(live.w.dir)}, ${fmt(live.w.dir)}°`], ['Высота площадки', fmt(W.elev[i]) + ' м'], ['Кабель до подстанции', fmt(W.route[i] / 1000, 1) + ' км']]) + act; return; }
+      kv([['Ветер на роторе', fmt(v[i], 1) + ' м/с'], ['Потеря скорости в следе', fmt(def[i] * 100, 1) + ' %', def[i] > .12 ? 'bad' : ''], ['Обороты ротора', fmt(rpm[i] < 1 ? 0 : rpm[i], 1) + ' об/мин'], ['Угол лопастей', fmt(run[i] ? W.pitch(v[i], rho[i]) : 88) + '°'], ['Курс гондолы', `${compass(live.w.dir)}, ${fmt(live.w.dir)}°`], ['Высота площадки', fmt(W.elev[i]) + ' м'], ['Кабель до подстанции', fmt(W.route[i] / 1000, 1) + ' км'], ...(t => [['Редуктор, генератор', `${fmt(t.gear)} и ${fmt(t.gen)} °C`, t.gen > 95 ? 'bad' : ''], ['Подшипник, преобразователь', `${fmt(t.bear)} и ${fmt(t.conv)} °C`, t.bear > 95 || t.conv > 95 ? 'bad' : '']])(temps(i))]) + act; return; }
   const f = s.f, m = W.feeders[f], p = m.reduce((a, i) => a + pw[i], 0), I = p / (Math.sqrt(3) * W.EL.kv * W.EL.cosphi);
-  el.innerHTML = `<div class="card-head"><span class="pill ${tripped[f] ? 'bad' : ''}"><i></i><span>${tripped[f] ? 'Отключён' : 'В работе'}</span></span>${X_BTN}</div>${seg}<h3 class="insp-title">Фидер ${f + 1}</h3><div class="insp-sub">33 кВ, ${m.length} ВЭУ: ${m.map(wName).join(', ').replace(/WTG/g, '')}</div><div class="big"><b>${pwf(p)}</b><span>из ${fmt(m.length * T.rated / 1000, 1)} МВт</span></div>` +
+  el.innerHTML = `<div class="card-head"><span class="pill ${tripped[f] ? 'bad' : ''}"><i></i><span>${tripped[f] ? 'Отключён' : 'В работе'}</span></span>${X_BTN}</div>${seg}<h3 class="insp-title">Фидер ${f + 1}</h3><div class="insp-sub">35 кВ, трансформатор Т${W.feederTr[f] + 1}, ${m.length} ВЭУ: ${m.map(wName).join(', ').replace(/WTG/g, '')}</div><div class="big"><b>${pwf(p)}</b><span>из ${fmt(m.length * T.rated / 1000, 1)} МВт</span></div>` +
     kv([['Ток в головном кабеле', fmt(I) + ' А'], ['Сечения кабеля', m.map((_, k) => W.section(k + 1)).filter((x, k, a) => a.indexOf(x) === k).join(', ') + ' мм²'], ['Длина трассы', fmt(Math.max(...m.map(i => W.route[i])) / 1000, 1) + ' км'], ['На шинах подстанции', pwf(live.fP ? live.fP[f] : 0)]]) + act;
 }
 $('#insp').addEventListener('click', e => { const act = e.target.closest('[data-act]'), lv = e.target.closest('[data-level]'), nw = e.target.closest('[data-new]'), adv = e.target.closest('[data-adv]');
   if (nw) return createOrder(nw.dataset.new); if (adv) return advanceOrder(adv.dataset.adv);
   if (lv) { const s = S.sel; if (lv.dataset.level === 'feeder' && s.level === 'wtg') return select({ level: 'feeder', f: W.feeder[s.i] }); if (lv.dataset.level === 'wtg' && s.level === 'feeder') return select({ level: 'wtg', i: W.feeders[s.f][0] }); return; }
   if (act) act.dataset.act === 'fly' ? flyToSel() : select(null); });
-function selCenter(s) { if (s.level === 'ss') return { p: new THREE.Vector3(SITE.ss[0] + 40, ssY + 10, SITE.ss[1]), r: 330 }; if (s.level === 'wtg') return { p: new THREE.Vector3(W.X[s.i], baseY[s.i] + 90, W.Z[s.i]), r: 420 };
+function selCenter(s) { if (s.level === 'ss') return { p: new THREE.Vector3(SITE.ss[0] - 10, ssY + 10, SITE.ss[1]), r: 300 }; if (s.level === 'bess') return { p: new THREE.Vector3(SITE.ss[0] + 378, ssY + 5, SITE.ss[1]), r: 330 }; if (s.level === 'wtg') return { p: new THREE.Vector3(W.X[s.i], baseY[s.i] + 95, W.Z[s.i]), r: 190 };
   const m = W.feeders[s.f]; let x = 0, z = 0; m.forEach(i => { x += W.X[i]; z += W.Z[i]; }); x /= m.length; z /= m.length; return { p: new THREE.Vector3(x, ground(x, z) + 60, z), r: 1800 }; }
 function markSel() { const s = S.sel; Object.values(labels).forEach(l => l.el.classList.toggle('sel', !!s && l.key === selKey(s))); }
-function select(s, fly) { S.sel = s; paintDots(); renderInspector(); renderLegend(); markSel(); insets(); if (s && fly) flyToSel(); }
+function select(s, fly) { S.sel = s; paintDots(); poseXray(); renderInspector(); renderLegend(); markSel(); insets(); if (s && fly) flyToSel(); }
 let tween = null;
 function flyView(pos, tgt, ms = 1700) { const p = new THREE.Vector3(...pos), a = new THREE.Vector3(...tgt); a.y += ground(a.x, a.z); p.y += ground(a.x, a.z); if (reduceMotion) { camera.position.copy(p); controls.target.copy(a); return; } tween = { t0: performance.now(), ms, p0: camera.position.clone(), p1: p, a0: controls.target.clone(), a1: a }; }
 function flyToSel() { if (!S.sel) return; const { p, r } = selCenter(S.sel), dir = camera.position.clone().sub(controls.target).normalize(); if (dir.y < .3) { dir.y = .3; dir.normalize(); } const to = p.clone().add(dir.multiplyScalar(r * 2.2)); tween = reduceMotion ? null : { t0: performance.now(), ms: 1200, p0: camera.position.clone(), p1: to, a0: controls.target.clone(), a1: p }; if (reduceMotion) { camera.position.copy(to); controls.target.copy(p); } }
@@ -408,28 +536,29 @@ function flyToSel() { if (!S.sel) return; const { p, r } = selCenter(S.sel), dir
 /* ═════════ подписи, легенда ═════════ */
 const labels = {}, labelsEl = $('#labels'), v3 = new THREE.Vector3();
 function addLabel(id, pos, html, cls, onclick, key) { const d = document.createElement('div'); d.className = 'lbl ' + (cls || ''); d.innerHTML = html; d.onclick = onclick; labelsEl.appendChild(d); labels[id] = { el: d, p: pos, key }; }
-addLabel('ss', new THREE.Vector3(SITE.ss[0], 40, SITE.ss[1]), `<i></i><b>ПС 220/33 кВ</b><span></span>`, '', () => select({ level: 'ss' }, true), 'ss:');
+addLabel('ss', new THREE.Vector3(SITE.ss[0], 40, SITE.ss[1]), `<i></i><b>ПС 220/35 кВ</b><span></span>`, '', () => select({ level: 'ss' }, true), 'ss:');
+addLabel('bess', new THREE.Vector3(SITE.ss[0] + 378, 30, SITE.ss[1]), `<i></i><b>СНЭ</b><span></span>`, '', () => select({ level: 'bess' }, true), 'bess:');
 function alertLabels() {
   Object.keys(labels).filter(k => k[0] === 'a').forEach(k => { labels[k].el.remove(); delete labels[k]; });
   const top = i => new THREE.Vector3(W.X[i], baseY[i] + T.hub + 40, W.Z[i]);
   if (S.stage === 'ops') { evCache.slice(0, PHONE ? 2 : 5).forEach((e, k) => { const i = e.sel.level === 'wtg' ? e.sel.i : W.feeders[e.sel.f][0]; addLabel('a' + k, top(i), `<i></i><b>${e.sel.level === 'wtg' ? wName(i) : 'Фидер ' + (e.sel.f + 1)}</b><span>${e.loss > 1 ? '−' + pwf(e.loss) : ''}</span>`, 'alert', () => select(e.sel, true), e.key); });
-    labels.ss.el.querySelector('span').textContent = pwf(live.hv); }
-  if (S.stage === 'build') { bm.cranes.slice(0, 3).forEach((i, k) => addLabel('a' + k, top(i), `<i></i><b>Кран</b><span>${wName(i)}</span>`, 'alert', () => select({ level: 'wtg', i }, true), 'wtg:' + i)); labels.ss.el.querySelector('span').textContent = fmt(bm.acts.find(a => a.id === 'ss').fact) + ' %';
+    labels.ss.el.querySelector('span').textContent = pwf(live.hv); { const kq = Math.min(curve.length - 1, Math.round(S.min / 10)); labels.bess.el.querySelector('span').textContent = fmt(soc[kq] * 100) + ' %'; } }
+  if (S.stage === 'build') { bm.cranes.slice(0, 3).forEach((i, k) => addLabel('a' + k, top(i), `<i></i><b>Кран</b><span>${wName(i)}</span>`, 'alert', () => select({ level: 'wtg', i }, true), 'wtg:' + i)); labels.ss.el.querySelector('span').textContent = fmt(bm.acts.find(a => a.id === 'ss').fact) + ' %'; labels.bess.el.querySelector('span').textContent = fmt(bm.acts.find(a => a.id === 'bess').fact) + ' МВт·ч';
     if (S.bmode === 'qc') bm.open.slice(-6).forEach((q, k) => addLabel('aq' + k, top(q.i), `<i></i><b>${wName(q.i)}</b>`, 'alert', () => select({ level: 'wtg', i: q.i }, true), 'wtg:' + q.i)); }
-  if (S.stage === 'cost') labels.ss.el.querySelector('span').textContent = '';
+  if (S.stage === 'cost') { labels.ss.el.querySelector('span').textContent = ''; labels.bess.el.querySelector('span').textContent = '300 МВт'; }
 }
 const INS = { l: 0, r: 0, t: 0, b: 0, block: [] };
 function insets() { const w = canvas.clientWidth, h = canvas.clientHeight;
   if (innerWidth <= 760) { INS.l = -30; INS.r = -30; INS.t = $('#top').getBoundingClientRect().bottom - 10; INS.b = $('#modes').offsetHeight ? 58 : 8; INS.block = []; const cy = (INS.t + h - INS.b) / 2; camera.setViewOffset(w, h, 0, Math.round(h / 2 - cy), w, h); return; }
   INS.r = w - $('#right').getBoundingClientRect().left + 4; INS.b = h - $('#bot').getBoundingClientRect().top + 4; INS.t = $('#top').getBoundingClientRect().bottom + 4; INS.l = 8; INS.block = ['#modes', '#legend', '#insp'].map(q => $(q).getBoundingClientRect()).filter(r => r.width > 0);
   const cx = (INS.l + w - INS.r) / 2, cy = (INS.t + h - INS.b) / 2; camera.setViewOffset(w, h, Math.round(w / 2 - cx), Math.round(h / 2 - cy), w, h); }
-function placeLabels() { const w = canvas.clientWidth, h = canvas.clientHeight; for (const l of Object.values(labels)) { v3.copy(l.p).project(camera); const x = (v3.x * .5 + .5) * w, y = (-v3.y * .5 + .5) * h, vis = v3.z < 1 && x > INS.l + 40 && x < w - INS.r - 40 && y > INS.t + 34 && y < h - INS.b - 6 && !INS.block.some(r => x > r.left - 70 && x < r.right + 70 && y > r.top - 4 && y < r.bottom + 34);
-    l.el.style.display = vis ? '' : 'none'; if (vis) l.el.style.transform = `translate(${x.toFixed(1)}px,${y.toFixed(1)}px) translate(-50%,-150%)`; } }
+function placeLabels() { const w = canvas.clientWidth, h = canvas.clientHeight; let ssXY = null; for (const l of Object.values(labels)) { v3.copy(l.p).project(camera); const x = (v3.x * .5 + .5) * w, y = (-v3.y * .5 + .5) * h, vis = v3.z < 1 && x > INS.l + 40 && x < w - INS.r - 40 && y > INS.t + 34 && y < h - INS.b - 6 && !INS.block.some(r => x > r.left - 70 && x < r.right + 70 && y > r.top - 4 && y < r.bottom + 34);
+    let show = vis && !(l.near && camera.position.distanceTo(l.p) > l.near); if (l === labels.ss && show) ssXY = [x, y]; if (l === labels.bess && show && ssXY && Math.abs(x - ssXY[0]) < 150 && Math.abs(y - ssXY[1]) < 26) show = false; l.el.style.display = show ? '' : 'none'; if (show) l.el.style.transform = `translate(${x.toFixed(1)}px,${y.toFixed(1)}px) translate(-50%,-150%)`; } }
 function renderLegend() {
   const css = s => `linear-gradient(90deg,${s.map(c => `rgb(${c.map(x => Math.round(x * 255)).join(',')})`).join(',')})`, el = $('#legend'), key = a => `<div class="keys">${a.map(x => `<span><i style="background:#${x[0].toString(16).padStart(6, '0')}"></i>${x[1]}</span>`).join('')}</div>`; let h = '';
   if (S.stage === 'ops') { if (S.mode === 'power') h = `<h2>Мощность ветроустановки</h2><div class="ramp" style="background:${css(RP)}"></div><div class="ticks"><span>0</span><span>3,6</span><span>7,15 МВт</span></div>`;
     if (S.mode === 'wake') h = `<h2>Потеря скорости ветра в следе</h2><div class="ramp" style="background:${css(RW)}"></div><div class="ticks"><span>0</span><span>11 %</span><span>22 %</span></div>`;
-    if (S.mode === 'elec') h = `<h2>Кабельные траншеи 33 кВ</h2>` + key(Object.keys(TR_COL).map(k => [TR_COL[k], TR_NAME[k]])) + `<p class="note">Цвет точки и линии над ВЭУ — фидер. Разбивка на 28 фидеров расчётная.</p>`;
+    if (S.mode === 'elec') h = `<h2>Кабельные траншеи 35 кВ</h2>` + key(Object.keys(TR_COL).map(k => [TR_COL[k], TR_NAME[k]])) + `<p class="note">Цвет точки и линии над ВЭУ — фидер. Фидеров ${W.NF}, как в ведомости подстанции; какие ВЭУ на каком фидере — расчёт.</p>`;
     if (S.mode === 'zones') h = `<h2>Зоны ограничений</h2>` + key([[0xc77dff, 'археология, охранные зоны'], [0x4ade80, 'чувствительная природа'], [0xff5a4a, 'сибиреязвенные захоронения, 1 км']]); }
   if (S.stage === 'build') h = S.bmode === 'stat' ? `<h2>Что сделано по ветроустановке</h2>` + key(STAGE_COL.map((c, i) => [c, E.STAGE[i]]).slice(1)) : S.bmode === 'pf' ? `<h2>Отставание от плана</h2>` + key([[0x62d6a0, 'в срок'], [0xf5b544, 'до двух недель'], [0xf0784a, 'до полутора месяцев'], [0xe5352f, 'больше']]) : `<h2>Открытые замечания ОТК</h2>` + key([[0xf5b544, 'есть замечание'], [0xe5352f, 'критичное']]);
   const isHint = !h && !S.sel && S.stage === 'ops'; if (isHint) h = `<p class="empty" style="font-size:12px">${S.stage === 'ops' ? 'Нажмите на ветроустановку или подстанцию. Слои слева показывают мощность, следы, кабельную сеть и зоны ограничений.' : ''}</p>`;
@@ -442,29 +571,30 @@ $('#play').addEventListener('click', () => { S.playing = !S.playing; $('#play-ic
 $('#now').addEventListener('click', () => { if (S.stage === 'ops') S.min = 720; else S.bday = E.factEnd + 5; $('#t').value = S.stage === 'ops' ? S.min : S.bday; refresh(); });
 const q = $('#q'), sug = $('#suggest'); let sugList = [];
 function suggest(text) { const s = text.trim().toLowerCase(), out = [], num = (s.match(/\d+/) || [''])[0]; if (!s) return out;
-  if (/пс|подст|ss|sub/.test(s)) out.push({ label: 'Подстанция 220/33 кВ', hint: 'точка учёта', sel: { level: 'ss' } });
-  if (/фид|fee/.test(s) && num && +num >= 1 && +num <= W.NF) out.push({ label: 'Фидер ' + num, hint: '33 кВ', sel: { level: 'feeder', f: +num - 1 } });
+  if (/пс|подст|ss|sub/.test(s)) out.push({ label: 'Подстанция 220/35 кВ', hint: 'точка учёта', sel: { level: 'ss' } });
+  if (/снэ|накоп|bess|бата/.test(s)) out.push({ label: 'Накопитель энергии', hint: '300 МВт / 600 МВт·ч', sel: { level: 'bess' } });
+  if (/фид|fee/.test(s) && num && +num >= 1 && +num <= W.NF) out.push({ label: 'Фидер ' + num, hint: '35 кВ', sel: { level: 'feeder', f: +num - 1 } });
   if (num && !/фид|fee/.test(s)) for (let i = 0; i < N && out.length < 7; i++) if (wName(i).replace('WTG', '').replace(/^0+/, '').startsWith(String(+num))) out.push({ label: wName(i), hint: 'фидер ' + (W.feeder[i] + 1), sel: { level: 'wtg', i } });
   return out.slice(0, 7); }
-const goSug = s => { if (S.stage === 'cost' || (S.stage === 'build' && s.sel.level === 'feeder')) setStage('ops', false); select(s.sel, true); sug.classList.remove('open'); };
+const goSug = s => { if (S.stage === 'cost' || (S.stage === 'build' && s.sel.level !== 'wtg')) setStage('ops', false); select(s.sel, true); sug.classList.remove('open'); };
 q.addEventListener('input', () => { sugList = suggest(q.value); sug.innerHTML = sugList.map((s, i) => `<button data-i="${i}" class="${i ? '' : 'act'}"><span>${s.label}</span><small>${s.hint}</small></button>`).join('') || (q.value.trim() ? '<div style="padding:8px 10px;color:var(--muted)">Не нашёл. Попробуйте «45», «фидер 7» или «подстанция».</div>' : ''); sug.classList.toggle('open', !!q.value.trim()); });
 q.addEventListener('keydown', e => { if (e.key === 'Enter' && sugList[0]) { goSug(sugList[0]); q.blur(); } if (e.key === 'Escape') { q.value = ''; sug.classList.remove('open'); } });
 sug.addEventListener('click', e => { const b = e.target.closest('[data-i]'); if (b) goSug(sugList[+b.dataset.i]); }); q.addEventListener('blur', () => setTimeout(() => sug.classList.remove('open'), 150));
 const ray = new THREE.Raycaster(), ndc = new THREE.Vector2();
 function hitAt(cx, cy) { const r = canvas.getBoundingClientRect(); ndc.set((cx - r.left) / r.width * 2 - 1, -(cy - r.top) / r.height * 2 + 1); ray.setFromCamera(ndc, camera);
   const h = ray.intersectObject(pickMesh, false)[0], g = ray.intersectObject(terrain, false)[0]; if (h && (!g || h.distance < g.distance + 60)) return { i: h.instanceId };
-  if (g && Math.abs(g.point.x - SITE.ss[0] - 40) < 200 && Math.abs(g.point.z - SITE.ss[1]) < 140) return { ss: 1 }; return null; }
+  const hs = ray.intersectObject(dyn, true)[0], q = hs && (!g || hs.distance < g.distance + 5) ? hs.point : g && g.point; if (q) { const dx = q.x - SITE.ss[0], dz = Math.abs(q.z - SITE.ss[1]); if (dx > -176 && dx < 156 && dz < 122) return { ss: 1 }; if (dx > 184 && dx < 572 && dz < 76) return { bess: 1 }; } return null; }
 let down = null, hoverQ = null; const tip = $('#tip');
 canvas.addEventListener('pointerdown', e => { down = { x: e.clientX, y: e.clientY }; tween = null; });
-canvas.addEventListener('pointerup', e => { if (!down || Math.hypot(e.clientX - down.x, e.clientY - down.y) > 5) return; down = null; if (S.stage === 'cost') return; const h = hitAt(e.clientX, e.clientY); if (!h) return select(null); if (h.ss) return select({ level: 'ss' });
+canvas.addEventListener('pointerup', e => { if (!down || Math.hypot(e.clientX - down.x, e.clientY - down.y) > 5) return; down = null; if (S.stage === 'cost') return; const h = hitAt(e.clientX, e.clientY); if (!h) return select(null); if (h.ss) return select({ level: 'ss' }); if (h.bess) return select({ level: 'bess' });
   select(S.stage === 'ops' && S.sel && S.sel.level === 'feeder' ? { level: 'feeder', f: W.feeder[h.i] } : { level: 'wtg', i: h.i }); });
 canvas.addEventListener('pointermove', e => { if (e.pointerType !== 'touch') hoverQ = e; }); canvas.addEventListener('pointerleave', () => { hoverQ = null; tip.style.opacity = 0; });
 function doHover() { const e = hoverQ; hoverQ = null; if (!e || e.buttons || S.stage === 'cost') { tip.style.opacity = 0; return; } const h = hitAt(e.clientX, e.clientY); if (!h) { tip.style.opacity = 0; canvas.style.cursor = ''; return; } canvas.style.cursor = 'pointer';
-  tip.innerHTML = h.ss ? `Подстанция 220/33 кВ <b>${pwf(live.hv)}</b>` : S.stage === 'build' ? `${wName(h.i)} <b>${E.STAGE[bState[h.i].stage].toLowerCase()}</b>` : `${wName(h.i)} <b>${pwf(pw[h.i])}, ${fmt(v[h.i], 1)} м/с</b>`; tip.style.opacity = 1; tip.style.transform = `translate(${e.clientX + 14}px,${e.clientY + 16}px)`; }
+  tip.innerHTML = h.ss ? `Подстанция 220/35 кВ <b>${pwf(live.hv)}</b>` : h.bess ? `Накопитель <b>300 МВт / 600 МВт·ч</b>` : S.stage === 'build' ? `${wName(h.i)} <b>${E.STAGE[bState[h.i].stage].toLowerCase()}</b>` : `${wName(h.i)} <b>${pwf(pw[h.i])}, ${fmt(v[h.i], 1)} м/с</b>`; tip.style.opacity = 1; tip.style.transform = `translate(${e.clientX + 14}px,${e.clientY + 16}px)`; }
 addEventListener('keydown', e => { if (e.key === 'Escape' && document.activeElement !== q) select(null); });
 
 /* ═════════ цикл ═════════ */
-function resize() { const w = canvas.clientWidth, h = canvas.clientHeight, pr = renderer.getPixelRatio(); if (canvas.width !== Math.floor(w * pr) || canvas.height !== Math.floor(h * pr)) { renderer.setSize(w, h, false); camera.aspect = w / h; camera.fov = w / h < 1.15 ? 50 : 36; camera.updateProjectionMatrix(); insets(); } }
+function resize() { const w = canvas.clientWidth, h = canvas.clientHeight, pr = renderer.getPixelRatio(); if (canvas.width !== Math.floor(w * pr) || canvas.height !== Math.floor(h * pr)) { renderer.setSize(w, h, false); composer && composer.setSize(w, h); camera.aspect = w / h; camera.fov = w / h < 1.15 ? 50 : 36; camera.updateProjectionMatrix(); insets(); } }
 const ease = t => t < .5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2; let last = performance.now(), acc = 0;
 function frame(now) {
   const dt = Math.min(.1, (now - last) / 1000); last = now; resize();
@@ -476,7 +606,9 @@ function frame(now) {
   if (Math.abs(sc.right - sh) > sh * .15) { sc.left = -sh; sc.right = sh; sc.top = sh; sc.bottom = -sh; sc.near = 100; sc.far = sh * 8; sc.updateProjectionMatrix(); }
   sunL.target.position.copy(controls.target); sunL.position.copy(controls.target).addScaledVector(sunL.userData.dir || new THREE.Vector3(0, 1, 0), sh * 4);
   if (hoverQ) doHover(); if (envDirty && now - envTimer > 140) { envDirty = false; envTimer = now; refreshEnv(); }
-  poseRotors(S.stage === 'cost' ? dt : dt); flow(dt); renderer.render(scene, camera); placeLabels(); requestAnimationFrame(frame);
+  AGC.acc += dt; if (AGC.acc >= 1) { AGC.acc = 0; agcStep(); if (S.stage === 'ops') renderAgc(); }
+  if (live.w) CLOUD.uOff.value.addScaledVector(new THREE.Vector2(fX, fZ), -live.w.v * dt * 0.00016 * 9);
+  poseRotors(dt); flow(dt); composer ? composer.render() : renderer.render(scene, camera); placeLabels(); requestAnimationFrame(frame);
 }
 applyHeights(); layout(); buildCurve(); setStage('ops', false); resize(); refreshEnv();
 { const vw = VIEWS.ops; if (reduceMotion) { camera.position.set(...vw[0]); controls.target.set(...vw[1]); } else tween = { t0: performance.now() + 300, ms: 3200, p0: camera.position.clone(), p1: new THREE.Vector3(...vw[0]), a0: controls.target.clone(), a1: new THREE.Vector3(...vw[1]) }; }

@@ -236,3 +236,14 @@ table.boq{width:100%;border-collapse:collapse;font-size:12px}
 .note{color:var(--faint);font-size:11px;line-height:1.45;margin-top:8px}
 #status{position:fixed;left:50%;top:70px;transform:translateX(-50%);padding:6px 12px;border-radius:999px;background:var(--glass-strong);border:1px solid var(--line);font-size:11.5px;color:var(--muted);z-index:7;pointer-events:none;transition:opacity .4s}
 #status:empty{opacity:0}
+
+.quad{grid-column:1/-1;display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px;font-size:10.5px;color:var(--muted);white-space:nowrap}
+.quad .bar{display:block;margin-top:4px}
+.fin.sc{grid-template-columns:minmax(0,1fr)}
+.fin select{background:none;border:0;padding:0;font:500 13.5px var(--display);color:var(--text);width:100%;appearance:none;-webkit-appearance:none;cursor:pointer;text-overflow:ellipsis}
+.fin select option{background:#161c2a}
+
+#sld{position:fixed;left:190px;right:calc(var(--rw) + 44px);top:78px;z-index:3;max-height:calc(100% - 290px);overflow:auto;scrollbar-width:none}
+#insp .kv dd{white-space:normal;max-width:60%}
+.lbl span:only-child,.lbl b:first-child{margin-left:0}
+@media (max-width:760px){#sld{position:static;width:auto;max-height:none}}
