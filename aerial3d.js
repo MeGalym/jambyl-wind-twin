@@ -2,7 +2,7 @@
    Кадр 320 × 220 м, север вверху, ось башни в точке (230, 112) от левого верхнего угла — как у слоя аэросъёмки на карте.
    Это рендер модели, а не фотография с дрона: состояние стройки берётся из хода работ на дату облёта. */
 import * as THREE from 'three';
-import { createSite } from './site3d.js';
+import { createSite } from './site3d.js?v=2';
 
 const W = 640, Hh = 440, X0 = -230, X1 = 90, Z0 = -112, Z1 = 108, cache = new Map(), tiles = new Map();
 let R = null, chain = Promise.resolve();

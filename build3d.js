@@ -6,7 +6,7 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
-import { createSite, H } from './site3d.js';
+import { createSite, H } from './site3d.js?v=2';
 
 const $ = q => document.querySelector(q);
 const P = new URLSearchParams(location.hash.slice(1)), CFG = { wtg: P.get('wtg') || 'ВЭУ', now: Math.max(0, Math.min(10, +(P.get('b') ?? 10))), f: (P.get('f') || '').split(',').filter(Boolean), pl: (P.get('pl') || '').split(',').filter(Boolean), d: P.get('d') || '' };

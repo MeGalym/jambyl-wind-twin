@@ -40,7 +40,7 @@
     if (bare) return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 220" preserveAspectRatio="none"><rect width="320" height="220" fill="#978a63"/>${g}${bx}<rect x=".7" y=".7" width="318.6" height="218.6" fill="none" stroke="#fff" stroke-width="1.4" opacity=".85"/></svg>`;
     return `<svg viewBox="0 0 320 220" role="img" aria-label="Схематичный снимок ${name(i)} сверху"><rect width="320" height="220" fill="#978a63"/>${g}${bx}<path d="M298 30v-16l-5 8M298 14l5 8" fill="none" stroke="#fff" stroke-width="1.4" opacity=".8"/><text x="298" y="40" font-size="8" text-anchor="middle" fill="#fff" opacity=".8">С</text><path d="M14 206h50M14 203v6M64 203v6" stroke="#fff" stroke-width="1.2" opacity=".8" fill="none"/><text x="39" y="201" font-size="8" text-anchor="middle" fill="#fff" opacity=".8">50 м</text></svg>`; }
   /* снимки — рендер 3D-сцены стройки сверху на спутниковой подложке (aerial3d.js); пока он готовится, показана схема */
-  let A3 = null; const a3 = () => A3 || (A3 = import('./aerial3d.js?v=1').catch(() => null));
+  let A3 = null; const a3 = () => A3 || (A3 = import('./aerial3d.js?v=2').catch(() => null));
   const bAt = (i, D) => { const d = E.detail(i, D), k = d.next ? d.steps.indexOf(d.next) : 10; if (k >= 10) return 10; const prev = k > 0 && d.steps[k - 1].id === d.next.id ? d.steps[k - 1].day : E.fact[d.next.id].s[i]; return k + Math.max(0, Math.min(.98, (D - prev) / Math.max(.5, d.next.day - prev))); };
   const corners = i => [UI.LL(SITE.wtg[i][1] - 230, SITE.wtg[i][2] - 112), UI.LL(SITE.wtg[i][1] + 90, SITE.wtg[i][2] + 108)];
   const photo = (i, D) => a3().then(m => m ? m.photo(name(i), bAt(i, D), ...corners(i)) : null);
