@@ -109,10 +109,56 @@ export function buildMachine(renderer) {
   function setBearing(id, st) { const r = rings[id]; if (!r) return; r.material.color.setHex(COL[st]); r.material.emissive.setHex(COL[st]); r.material.emissiveIntensity = st === 'ok' ? .7 : 1.6; r.scale.setScalar(st === 'alarm' ? 1.12 : 1); }
   let selBox = null;
   function highlight(id) { if (selBox) { scene.remove(selBox); selBox.geometry.dispose(); selBox = null; } if (id && id !== 'blades' && id !== 'tower') { selBox = new THREE.BoxHelper(units[id].g, 0xf2b632); selBox.material.toneMapped = false; scene.add(selBox); } }
-  function update(st, dt, e) { const w = e < 0.02 ? st.rpm * Math.PI / 30 * dt : 0; rotor.rotation.z += w; bladeRot.rotation.z += w; planets.rotation.z += w * 6; hss.rotation.z += w * 40; genRotor.rotation.z += w * 40; disc.rotation.z += w * 40;
+  function update(st, dt, e) { const w = e < 0.02 ? st.rpm * Math.PI / 30 * dt * spin : 0; rotor.rotation.z += w; bladeRot.rotation.z += w; planets.rotation.z += w * 6; hss.rotation.z += w * 40; genRotor.rotation.z += w * 40; disc.rotation.z += w * 40;
     for (const b of bladeMeshes) b.rotation.y = -st.pitch * RAD; if (selBox) selBox.update(); }
+
+  /* ---------- стройка: один вход b = 0…10, десять шагов от подъезда до пуска; каждая деталь встаёт на место как функция b ---------- */
+  const NAC = ['yaw', 'bed', 'shaft', 'bear1', 'bear2', 'gear', 'brake', 'gen', 'conv', 'trf', 'cool', 'cover'], UP = new THREE.Vector3(0, 1, 0), tv = new THREE.Vector3();
+  const bg = new THREE.Group(); bg.visible = false; scene.add(bg);
+  const yel = new THREE.MeshStandardMaterial({ color: 0xf2b632, roughness: .55, metalness: .25 }), gravel = new THREE.MeshStandardMaterial({ color: 0x4b453a, roughness: 1 }), soilTop = new THREE.MeshStandardMaterial({ color: 0x17140f, roughness: 1 });
+  const mk = (geo, m, x = 0, y = 0, z = 0, parent = bg) => { const o = new THREE.Mesh(geo, m); o.position.set(x, y, z); o.castShadow = o.receiveShadow = true; parent.add(o); return o; };
+  const lid = mk(new THREE.CircleGeometry(14.62, 96).rotateX(-Math.PI / 2), soilTop, 0, 0.012, 0), back = mk(new THREE.RingGeometry(3.32, 14.62, 96).rotateX(-Math.PI / 2), soilTop);
+  const pad = mk(new THREE.BoxGeometry(44, .5, 58), gravel), road = mk(new THREE.BoxGeometry(1, .3, 7), gravel), trench = mk(new THREE.BoxGeometry(1, .14, 1.4), new THREE.MeshStandardMaterial({ color: 0x2f8f88, roughness: .8 }));
+  lid.castShadow = back.castShadow = pad.castShadow = road.castShadow = trench.castShadow = false;
+  // арматура фундамента: нижняя и верхняя сетки, радиальные стержни, выпуски под подколонник
+  const rb3 = []; { const top = r => r < 3.3 ? 0.3 : -0.5 - (r - 3.3) / 9.7 * 2.4;
+    for (const lay of [0, 1]) { for (let r = 2; r <= 12.6; r += 1.5) for (let k = 0; k < 48; k++) { const a = k / 48 * 6.2832, c = (k + 1) / 48 * 6.2832, y = lay ? top(r) : -3.55; rb3.push(Math.cos(a) * r, y, Math.sin(a) * r, Math.cos(c) * r, y, Math.sin(c) * r); }
+      for (let k = 0; k < 36; k++) { const a = k / 36 * 6.2832; rb3.push(Math.cos(a) * 1.5, lay ? top(1.5) : -3.55, Math.sin(a) * 1.5, Math.cos(a) * 12.6, lay ? top(12.6) : -3.55, Math.sin(a) * 12.6); } }
+    for (let k = 0; k < 40; k++) { const a = k / 40 * 6.2832; rb3.push(Math.cos(a) * 3.0, -3.55, Math.sin(a) * 3.0, Math.cos(a) * 3.0, 0.4, Math.sin(a) * 3.0); } }
+  const rebarG = new THREE.BufferGeometry(); rebarG.setAttribute('position', new THREE.Float32BufferAttribute(rb3, 3)); const rebar = new THREE.LineSegments(rebarG, new THREE.LineBasicMaterial({ color: 0xc8733c })); bg.add(rebar);
+  // гусеничный кран: стоит на площадке, стрела следит за грузом
+  const crane = new THREE.Group(); bg.add(crane); const CP = new THREE.Vector3(-34, 0, -24), P0 = new THREE.Vector3();
+  for (const z of [-3.4, 3.4]) mk(new THREE.BoxGeometry(11, 1.5, 1.8), dark, 0, .75, z, crane); mk(new THREE.BoxGeometry(8, 3, 6.4), yel, -.5, 3.1, 0, crane); mk(new THREE.BoxGeometry(3.2, 2.6, 6), dark, -5.6, 3.3, 0, crane); mk(new THREE.BoxGeometry(2.2, 2.3, 2.2), cab, 3.2, 3.9, 2.4, crane);
+  const boom = mk(new THREE.CylinderGeometry(.5, .95, 1, 8), yel), rope = mk(new THREE.CylinderGeometry(.09, .09, 1, 6), dark), hook = mk(new THREE.BoxGeometry(1.3, .9, 1.3), yel);
+  const stick = (m, a, b) => { m.position.copy(a).add(b).multiplyScalar(.5); m.scale.set(1, Math.max(.01, a.distanceTo(b)), 1); m.quaternion.setFromUnitVectors(UP, tv.copy(b).sub(a).normalize()); };
+  const fndMesh = units.fnd.meshes[0], NS = NOM.towerSections, secTop = k => y0 + (y1 - y0) * (k + 1) / NS;
+  const eio = t => { t = Math.max(0, Math.min(1, t)); return t < .5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2; }, sg = (b, a, c) => Math.max(0, Math.min(1, (b - a) / (c - a)));
+  const secWin = k => k < 3 ? [4 + k / 3, 4 + (k + 1) / 3] : [5 + (k - 3) / 2, 5 + (k - 2) / 2], bladeAng = j => (90 - 120 * j) * RAD;
+  let bOn = false, spin = 1; const load = new THREE.Vector3(), tip = new THREE.Vector3();
+  function build(b) {
+    if (b == null) { if (bOn) { bOn = false; bg.visible = false; spin = 1; for (const u of Object.values(units)) u.g.visible = true; for (const m of units.tower.meshes) m.visible = true; for (const m of bladeMeshes) m.visible = true; fndMesh.scale.y = 1; fndMesh.position.y = 0; floor.visible = true; } return; }
+    bOn = true; bg.visible = true; let k;
+    k = sg(b, 0, 1); road.visible = k > 0; road.scale.x = Math.max(.01, 240 * k); road.position.set(-300 + 120 * k, .15, -14);
+    k = eio(sg(b, 1, 2)); pad.visible = k > 0; pad.scale.x = Math.max(.01, k); pad.position.set(-60 + 22 * k, .25, -14);
+    k = 1 - eio(sg(b, 2, 2.45)); lid.visible = k > .01; lid.scale.setScalar(Math.max(.01, k));
+    k = sg(b, 2.45, 2.8); rebar.visible = k > 0 && b < 3.62; rebarG.setDrawRange(0, Math.floor(k * rb3.length / 6) * 2);
+    k = eio(sg(b, 2.75, 3)); units.anchor.g.visible = k > 0; units.anchor.g.position.y = (1 - k) * 14;
+    k = sg(b, 3, 3.6); units.fnd.g.visible = k > 0; fndMesh.scale.y = Math.max(.001, k); fndMesh.position.y = -3.7 * (1 - k);
+    k = eio(sg(b, 3.65, 4)); back.visible = k > 0; back.position.y = -2.6 * (1 - k) + 0.006;
+    load.set(-8, H + 24, 0);
+    for (const m of units.tower.meshes) { const s = NS - 1 - m.userData.exK, [a, c] = secWin(s), p = sg(b, a, c), q = eio(sg(p, .08, .92)); m.visible = p > 0; m.position.y = base.get(m).y + (1 - q) * 46; if (p > 0 && p < 1) load.set(0, secTop(s) + (1 - q) * 46 + .4, 0); }
+    k = eio(sg(b, 6, 6.6)); for (const id of NAC) { units[id].g.visible = b > 6; units[id].g.position.y = (1 - k) * 44; } if (b > 6 && b < 6.6) load.set(0, H + 3.2 + (1 - k) * 44, -3);
+    k = eio(sg(b, 6.62, 7)); units.hub.g.visible = b > 6.62; units.hub.g.position.y = (1 - k) * 44; if (b > 6.62 && b < 7) load.set(0, H + 2.6 + (1 - k) * 44, 5.6);
+    units.blades.g.visible = b > 7;
+    for (let j = 0; j < 3; j++) { const a = 7 + j / 3, p = sg(b, a, a + 1 / 3), q = eio(sg(p, .25, 1)); bladeMeshes[j].visible = p > 0; bladeMeshes[j].position.set(0, 62 * (1 - q), 0); if (p > 0 && p < 1) load.set(-(34 + 62 * (1 - q)), H + 1.8, 5.6); }
+    if (b < 8) { const j = Math.max(0, Math.min(2, Math.floor((b - 7) * 3))), pj = b < 7 ? 1 : (b - 7) * 3 - j, from = j ? bladeAng(j - 1) : bladeAng(0), ang = from + (bladeAng(j) - from) * eio(sg(pj, 0, .22)); rotor.rotation.z = bladeRot.rotation.z = ang; }
+    k = sg(b, 8, 9); trench.visible = k > 0; trench.scale.x = Math.max(.01, 150 * k); trench.position.set(3 + 75 * k, .07, 0);
+    const cin = eio(sg(b, 3.82, 4)), cout = eio(sg(b, 9, 9.3)); crane.visible = boom.visible = rope.visible = hook.visible = b > 3.82 && b < 9.3; crane.position.set(CP.x - (1 - cin) * 60 - cout * 60, 0, CP.z);
+    if (crane.visible) { P0.set(crane.position.x + 1.5, 5, CP.z); tip.set(load.x, H + 44, load.z); stick(boom, P0, tip); stick(rope, tip, load); hook.position.copy(load); }
+    spin = b < 9.3 ? 0 : eio(sg(b, 9.3, 10)); floor.visible = true;
+  }
   const anchorOf = id => units[id].tag.clone().add(units[id].g.position);
-  return { scene, units, rings, explode, setMode, setBearing, highlight, update, anchorOf, key, get mode() { return mode; }, pickables: () => Object.values(units).flatMap(u => u.meshes) };
+  return { scene, units, rings, explode, build, setMode, setBearing, highlight, update, anchorOf, key, get mode() { return mode; }, pickables: () => Object.values(units).flatMap(u => u.meshes) };
 }
 
 // лопасть: сечения от комля к законцовке — хорда, толщина и крутка (форма принята*)

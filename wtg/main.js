@@ -4,6 +4,7 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { NOM, state, stateOf, BEARINGS } from './model.js';
 import { buildMachine } from './machine.js';
 import { buildConsole } from './console.js';
+import { buildPanel } from './build.js';
 
 const app = document.getElementById('app'), canvas = document.createElement('canvas'); canvas.id = 'gl'; app.appendChild(canvas);
 const H = NOM.hubH, Q = new URLSearchParams(location.search), RENDER = Q.has('render'), PHONE = matchMedia('(max-width:760px)').matches;
@@ -28,11 +29,21 @@ function pick(unit, bearing) { L.sel = unit; L.selB = bearing; M.highlight(unit)
 function setMode(m) { L.mode = m; M.setMode(m); }
 const ui = RENDER && Q.get('render') === 'clean' ? null : buildConsole(app, L, { wind: v => L.v = v, explode: e => { L.eT = e; if (L.cam && e > 0.02) goCam(L.cam, 500); }, mode: setMode, cam: goCam, pick });
 
+/* стройка ВЭУ: шкала b = 0…10 ведёт всю сцену; открывается параметром build=1, даты шагов приходят с экрана стройки */
+const B = { on: false, b: 10, now: 10, play: false, ph: '', panel: null };
+const BCAM = { f: [[30, 25, 54], [-4, -1.5, -2]], a: [[-262, 96, 318], [-12, 60, 0]] };
+function bcam(ms = 1400) { const ph = B.b < 4 ? 'f' : 'a'; if (ph === B.ph) return; B.ph = ph; flyTo(new THREE.Vector3(...BCAM[ph][0]), new THREE.Vector3(...BCAM[ph][1]), ms); }
+function startBuild(p) { const hud = document.getElementById('hud'); if (!hud) return; B.on = true; B.now = Math.max(0, Math.min(10, +(p.get('b') ?? 10))); B.b = B.now; B.play = false; B.ph = ''; L.e = L.eT = 0; setMode('out'); pick(null, null);
+  if (B.panel) B.panel.el.remove(); B.panel = buildPanel(hud, { wtg: L.wtg, now: B.now, f: (p.get('f') || '').split(',').filter(Boolean), pl: (p.get('pl') || '').split(',').filter(Boolean), d: p.get('d') }, {
+    seek: v => { B.b = v; B.play = false; bcam(700); }, jump: k => { B.b = k; B.play = true; bcam(900); },
+    act: a => { if (a === 'start') { B.b = 0; B.play = true; } else if (a === 'play') { if (B.b >= 10) B.b = 0; B.play = !B.play; } else if (a === 'now') { B.b = B.now; B.play = false; } else if (a === 'exit') { B.on = false; B.play = false; hud.classList.remove('bld'); goCam('nac'); return; } bcam(900); } });
+  hud.classList.add('bld'); bcam(0); }
 /* API для предиктивной диагностики */
 window.setBearingState = (id, st) => { if (st) L.forced[id] = st; else delete L.forced[id]; };
 window.setTags = tags => { Object.assign(L.tags, tags); };                        // {'Г1.T': 82, 'Г1.V': 5.1, 'V': 9.4}
 function applyParams(str) { const p = new URLSearchParams(str.replace(/^#/, ''));
   if (p.get('wtg')) L.wtg = p.get('wtg'); if (p.get('v')) L.v = +p.get('v'); if (p.get('t')) L.tAir = +p.get('t'); if (p.get('rho')) L.rho = +p.get('rho'); if (p.get('mode')) setMode(p.get('mode')); if (p.get('explode')) L.e = L.eT = +p.get('explode');
+  if (p.get('build')) startBuild(p);
   for (const k of ['alarm', 'warn', 'ok']) if (p.get(k)) for (const id of p.get(k).split(',')) window.setBearingState(id, k); if (p.get('view') && CAMS[p.get('view')]) goCam(p.get('view'), 0); }
 addEventListener('message', e => { const d = e.data || {}; if (d.bearing) window.setBearingState(d.bearing, d.state); if (d.tags) window.setTags(d.tags); if (d.v != null) L.v = +d.v; if (d.wtg) L.wtg = d.wtg; if (d.t != null) L.tAir = +d.t; if (d.params) applyParams(d.params); });
 addEventListener('hashchange', () => applyParams(location.hash));
@@ -41,10 +52,11 @@ function bearings(s) { return BEARINGS.map((b, i) => { const m = s.bearings[i], 
     return { ...b, t, vib, tag, st: L.forced[b.id] || stateOf(t, vib) }; }); }
 const v3 = new THREE.Vector3();
 function draw(dt) {
-  const s = state(L.tags.V ?? L.v, L.tAir, L.rho), bst = bearings(s); M.explode(L.e); M.update(s, dt, L.e); for (const b of bst) M.setBearing(b.id, b.st);
+  const s = state(L.tags.V ?? L.v, L.tAir, L.rho), bst = bearings(s); M.explode(L.e); M.build(B.on ? B.b : null); M.update(s, dt, L.e); for (const b of bst) M.setBearing(b.id, b.st);
   M.key.target.position.copy(controls.target); M.key.position.copy(controls.target).add(new THREE.Vector3(-60, 70, 80));
   renderer.render(M.scene, camera);
-  if (ui) { ui.update(s, bst); const show = L.e > .3 || L.mode !== 'out'; ui.tags(id => { v3.copy(M.anchorOf(id)); const far = v3.distanceTo(camera.position) > 120; if (far && !['blades', 'cover', 'tower', 'anchor', 'fnd'].includes(id)) return null; v3.project(camera); return { x: (v3.x * .5 + .5) * innerWidth, y: (-v3.y * .5 + .5) * innerHeight, z: v3.z }; }, show); }
+  if (B.panel) B.panel.update(B.b, B.play);
+  if (ui) { ui.update(s, bst); const show = !B.on && (L.e > .3 || L.mode !== 'out'); ui.tags(id => { v3.copy(M.anchorOf(id)); const far = v3.distanceTo(camera.position) > 120; if (far && !['blades', 'cover', 'tower', 'anchor', 'fnd'].includes(id)) return null; v3.project(camera); return { x: (v3.x * .5 + .5) * innerWidth, y: (-v3.y * .5 + .5) * innerHeight, z: v3.z }; }, show); }
 }
 function resize() { const w = innerWidth, h = innerHeight; renderer.setSize(w, h, false); camera.aspect = w / h; camera.fov = w / h < 1 ? 48 : 34;
   // центр сцены — в свободной зоне между панелями
@@ -52,7 +64,7 @@ function resize() { const w = innerWidth, h = innerHeight; renderer.setSize(w, h
   let l = 0, r = w, t = 0, bt = c ? c.top : h; if (w > 760) { if (a) l = a.right; if (b) r = b.left; } else if (a) t = a.bottom;
   OFF.x = (l + r) / 2 - w / 2; OFF.y = (t + bt) / 2 - h / 2; camera.setViewOffset(w, h, -OFF.x, -OFF.y, w, h); camera.updateProjectionMatrix(); }
 const OFF = { x: 0, y: 0 };
-addEventListener('resize', resize); setMode('out'); applyParams(location.hash); if (!Q.get('view') && !/view=/.test(location.hash)) goCam('nac', 0); resize();
+addEventListener('resize', resize); setMode('out'); applyParams(location.hash); if (!Q.get('view') && !/view=/.test(location.hash) && !B.on) goCam('nac', 0); resize();
 
 // выбор узла кликом по модели
 const ray = new THREE.Raycaster(), ndc = new THREE.Vector2(); let down = null;
@@ -69,8 +81,8 @@ if (RENDER) {      // съёмка: кадр — чистая функция в�
   window.seek(+Q.get('t') || 0);
 } else {
   let last = performance.now();
-  (function loop(now) { const dt = Math.min(.1, (now - last) / 1000); last = now; L.e += (L.eT - L.e) * Math.min(1, dt * 3.2); if (Math.abs(L.eT - L.e) < .001) L.e = L.eT;
+  (function loop(now) { const dt = Math.min(.1, (now - last) / 1000); last = now; if (B.on && B.play) { B.b = Math.min(10, B.b + dt * 10 / 48); if (B.b >= 10) B.play = false; bcam(); } L.e += (L.eT - L.e) * Math.min(1, dt * 3.2); if (Math.abs(L.eT - L.e) < .001) L.e = L.eT;
     if (tween) { const k = Math.min(1, (now - tween.t0) / tween.ms), q = ease(k); camera.position.lerpVectors(tween.p0, tween.p1, q); controls.target.lerpVectors(tween.a0, tween.a1, q); if (k >= 1) tween = null; }
     controls.update(); draw(dt); requestAnimationFrame(loop); })(last);
 }
-window.LIVE = { L, M, goCam, pick, setMode, camera, controls, snap() { L.e = L.eT; if (tween) { camera.position.copy(tween.p1); controls.target.copy(tween.a1); tween = null; } camera.lookAt(controls.target); draw(0); } };
+window.LIVE = { L, M, B, goCam, pick, setMode, camera, controls, snap() { L.e = L.eT; if (tween) { camera.position.copy(tween.p1); controls.target.copy(tween.a1); tween = null; } camera.lookAt(controls.target); draw(0); } };
