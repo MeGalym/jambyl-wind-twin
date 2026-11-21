@@ -450,3 +450,14 @@ details.more>summary{cursor:pointer;color:var(--muted);font-size:12.5px;padding:
 .atag b{font-weight:700}.atag.bad{border-color:var(--red);box-shadow:0 0 0 1px var(--red)}.atag.warn{border-color:var(--amber)}.atag.on{background:var(--amber);color:#1b1407}
 @media (max-width:860px){#aerbar{bottom:8px}}
 .wm .atag b{position:static;transform:none;text-shadow:none;font:inherit;font-weight:700;color:inherit}
+
+/* приёмка ВЭУ */
+.ck{width:46px;border-radius:8px;background:var(--soft);padding:4px 4px 5px;text-align:center;border:2px solid transparent}
+.ck:hover{background:var(--tile2)}.ck.on{border-color:var(--amber)}
+.ck b{display:block;font:600 11.5px var(--display);line-height:1.3}.ck span{display:grid;grid-template-columns:repeat(5,1fr);gap:1.5px;margin-top:3px}.ck i{height:5px;border-radius:1.5px}
+.cks{border-top:1px solid var(--line)}.cks:first-of-type{border-top:0}
+.cks summary{display:grid;grid-template-columns:12px minmax(0,1fr) auto;gap:9px;align-items:center;padding:10px 0;cursor:pointer;list-style:none;font-size:13px}.cks summary::-webkit-details-marker{display:none}
+.cks summary i{width:10px;height:10px;border-radius:50%}.cks summary b{font-weight:600}.cks summary em{font-style:normal;color:var(--muted);font-size:12px;white-space:nowrap}
+.cks .check{padding:0 0 12px 21px}.cks .check label{display:grid;grid-template-columns:16px minmax(0,1fr) auto;gap:0 8px;align-items:center;font-size:12.5px;cursor:pointer}
+.cks .check input{position:absolute;opacity:0;pointer-events:none}.cks .check label:hover span{color:var(--text)}.cks .check span{color:var(--muted)}.cks .check .done span{color:var(--text)}
+.cks .check input:focus-visible+i{outline:2px solid var(--amber);outline-offset:2px}
