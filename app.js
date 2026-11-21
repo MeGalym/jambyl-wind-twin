@@ -341,7 +341,7 @@ const pwf = kw => kw < 1000 ? fmt(kw) + ' кВт' : fmt(kw / 1000, kw < 1e5 ? 2 
 /* ═════════ эксплуатация ═════════ */
 function events() {
   const ev = [];
-  tripped.forEach((t, f) => { if (t) ev.push({ sev: 'bad', key: 'feeder:' + f, title: `Фидер ${f + 1} отключён`, sub: 'Сработала защита от замыкания на землю, 33 кВ', sel: { level: 'feeder', f }, loss: W.feeders[f].reduce((s, i) => s + pExp[i], 0), fix: () => tripped[f] = 0 }); });
+  tripped.forEach((t, f) => { if (t) ev.push({ sev: 'bad', key: 'feeder:' + f, title: `Фидер ${f + 1} отключён`, sub: 'Сработала защита от замыкания на землю, 35 кВ', sel: { level: 'feeder', f }, loss: W.feeders[f].reduce((s, i) => s + pExp[i], 0), fix: () => tripped[f] = 0 }); });
   for (let i = 0; i < N; i++) if (fault[i] && !tripped[W.feeder[i]]) ev.push({ sev: fault[i] === 3 ? 'bad' : 'warn', key: 'wtg:' + i, title: `${wName(i)}: ${fault[i] === 3 ? 'авария' : fault[i] === 4 ? 'обслуживание' : 'ограничение'}`, sub: faultText[i], sel: { level: 'wtg', i }, loss: Math.max(0, pExp[i] - pw[i]), fix: () => { fault[i] = 0; derate[i] = 1; } });
   return ev.sort((a, b) => b.loss - a.loss);
 }

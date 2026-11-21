@@ -461,3 +461,11 @@ details.more>summary{cursor:pointer;color:var(--muted);font-size:12.5px;padding:
 .cks .check{padding:0 0 12px 21px}.cks .check label{display:grid;grid-template-columns:16px minmax(0,1fr) auto;gap:0 8px;align-items:center;font-size:12.5px;cursor:pointer}
 .cks .check input{position:absolute;opacity:0;pointer-events:none}.cks .check label:hover span{color:var(--text)}.cks .check span{color:var(--muted)}.cks .check .done span{color:var(--text)}
 .cks .check input:focus-visible+i{outline:2px solid var(--amber);outline-offset:2px}
+
+/* матрица ответственности и ответственные в чек-листах */
+.rc{display:inline-block;min-width:24px;padding:1px 6px;border-radius:6px;font:600 11.5px var(--display);text-align:center;background:var(--tile2);color:var(--muted)}
+.rc.R{background:var(--amber);color:#1b1407}.rc.A{background:rgba(127,182,255,.3);color:#cfe2ff}.rc.S{background:rgba(98,214,160,.22);color:#8be6bd}
+.tbl.dor td.c,.tbl.dor th.c{text-align:center;width:112px}.tbl.dor td:first-child{color:var(--faint);font-family:var(--display);width:52px}
+.tbl.dor tr.shr td{background:rgba(255,100,82,.07)}
+.who{text-decoration:none;font-size:10.5px;padding:1px 7px;border-radius:999px;background:var(--tile2);color:var(--muted);white-space:nowrap;margin-left:4px}
+.who.T{background:rgba(127,182,255,.2);color:#a9cbff}.who.C{background:rgba(245,181,68,.2);color:#f8cd7c}
