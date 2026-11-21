@@ -9,7 +9,7 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Geologica:wght@300;400;500;600&family=Golos+Text:wght@400;500;600;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.css">
-<link rel="stylesheet" href="epc.css?v=15">
+<link rel="stylesheet" href="epc.css?v=16">
 </head>
 <body>
 <div id="app">
@@ -78,15 +78,18 @@
 <input type="file" id="file" accept=".csv,.txt,.xlsx" hidden>
 <input type="file" id="p6file" accept=".xer,.xml,.xlsx,.csv,.txt" hidden>
 <div id="toast" role="status"></div>
+<script type="importmap">
+{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js","three/addons/":"https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"}}
+</script>
 <script src="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.js"></script>
 <script src="site-data.js?v=22"></script>
 <script src="wind.js?v=22"></script>
 <script src="epcw.js?v=24"></script>
 <script src="fact.js?v=2"></script>
 <script src="p6.js?v=2"></script>
-<script src="epc.js?v=17"></script>
+<script src="epc.js?v=18"></script>
 <script src="epc-views.js?v=8"></script>
-<script src="epc-drone.js?v=2"></script>
+<script src="epc-drone.js?v=3"></script>
 <script src="epc-dor.js?v=1"></script>
 <script src="epc-est.js?v=1"></script>
 <script src="epc-plus.js?v=6"></script>
