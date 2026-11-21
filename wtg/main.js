@@ -31,8 +31,8 @@ const ui = RENDER && Q.get('render') === 'clean' ? null : buildConsole(app, L, {
 
 /* стройка ВЭУ: шкала b = 0…10 ведёт всю сцену; открывается параметром build=1, даты шагов приходят с экрана стройки */
 const B = { on: false, b: 10, now: 10, play: false, ph: '', panel: null };
-const BCAM = { f: [[30, 25, 54], [-4, -1.5, -2]], a: [[-262, 96, 318], [-12, 60, 0]] };
-function bcam(ms = 1400) { const ph = B.b < 4 ? 'f' : 'a'; if (ph === B.ph) return; B.ph = ph; flyTo(new THREE.Vector3(...BCAM[ph][0]), new THREE.Vector3(...BCAM[ph][1]), ms); }
+const BCAM = { s: [[46, 78, 128], [-70, 0, -12]], f: [[30, 25, 54], [-4, -1.5, -2]], a: [[-262, 96, 318], [-12, 60, 0]] };
+function bcam(ms = 1400) { const ph = B.b < 2 ? 's' : B.b < 4 ? 'f' : 'a'; if (ph === B.ph) return; B.ph = ph; flyTo(new THREE.Vector3(...BCAM[ph][0]), new THREE.Vector3(...BCAM[ph][1]), ms); }
 function startBuild(p) { const hud = document.getElementById('hud'); if (!hud) return; B.on = true; B.now = Math.max(0, Math.min(10, +(p.get('b') ?? 10))); B.b = B.now; B.play = false; B.ph = ''; L.e = L.eT = 0; setMode('out'); pick(null, null);
   if (B.panel) B.panel.el.remove(); B.panel = buildPanel(hud, { wtg: L.wtg, now: B.now, f: (p.get('f') || '').split(',').filter(Boolean), pl: (p.get('pl') || '').split(',').filter(Boolean), d: p.get('d') }, {
     seek: v => { B.b = v; B.play = false; bcam(700); }, jump: k => { B.b = k; B.play = true; bcam(900); },

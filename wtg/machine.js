@@ -117,7 +117,7 @@ export function buildMachine(renderer) {
   const bg = new THREE.Group(); bg.visible = false; scene.add(bg);
   const yel = new THREE.MeshStandardMaterial({ color: 0xf2b632, roughness: .55, metalness: .25 }), gravel = new THREE.MeshStandardMaterial({ color: 0x4b453a, roughness: 1 }), soilTop = new THREE.MeshStandardMaterial({ color: 0x17140f, roughness: 1 });
   const mk = (geo, m, x = 0, y = 0, z = 0, parent = bg) => { const o = new THREE.Mesh(geo, m); o.position.set(x, y, z); o.castShadow = o.receiveShadow = true; parent.add(o); return o; };
-  const lid = mk(new THREE.CircleGeometry(14.62, 96).rotateX(-Math.PI / 2), soilTop, 0, 0.012, 0), back = mk(new THREE.RingGeometry(3.32, 14.62, 96).rotateX(-Math.PI / 2), soilTop);
+  const lid = mk(new THREE.CircleGeometry(14.62, 96).rotateX(-Math.PI / 2), soil, 0, 0.012, 0), back = mk(new THREE.RingGeometry(3.32, 14.62, 96).rotateX(-Math.PI / 2), soilTop);
   const pad = mk(new THREE.BoxGeometry(44, .5, 58), gravel), road = mk(new THREE.BoxGeometry(1, .3, 7), gravel), trench = mk(new THREE.BoxGeometry(1, .14, 1.4), new THREE.MeshStandardMaterial({ color: 0x2f8f88, roughness: .8 }));
   lid.castShadow = back.castShadow = pad.castShadow = road.castShadow = trench.castShadow = false;
   // арматура фундамента: нижняя и верхняя сетки, радиальные стержни, выпуски под подколонник
