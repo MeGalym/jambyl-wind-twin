@@ -42,18 +42,19 @@
   /* ---------- карта площадки: настоящая подложка (спутник или рельеф) либо схема; рядом — матрица ВЭУ по фидерам.
      Издалека ВЭУ — метка класса, вблизи — площадка, фундамент, башня, лопасти и кран в масштабе. ---------- */
   const L = window.L, MT = SITE.meta, LL = (x, z) => [MT.lat0 - z / MT.kz, MT.lon0 + x / MT.kx], X = i => SITE.wtg[i][1], Z = i => SITE.wtg[i][2], P = i => LL(X(i), Z(i));
-  const BASES = { sat: ['Спутник', 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', 18, 'Снимки: Esri, Maxar, Earthstar Geographics'], topo: ['Рельеф', 'https://tile.opentopomap.org/{z}/{x}/{y}.png', 17, '© OpenTopoMap, участники OpenStreetMap'], plan: ['Схема', '', 0, ''] };
+  const BASES = { sat: ['Спутник', 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', 18, 'Снимки: Esri, Maxar, Earthstar Geographics'], topo: ['Рельеф', 'https://tile.opentopomap.org/{z}/{x}/{y}.png', 17, '© OpenTopoMap, участники OpenStreetMap'], plan: ['Схема', 'https://server.arcgisonline.com/ArcGIS/rest/services/Elevation/World_Hillshade_Dark/MapServer/tile/{z}/{y}/{x}', 16, 'Рельеф: Esri, USGS, NASA'] };      // схема лежит на отмывке рельефа: формы склонов настоящие
   const lineLL = a => { const o = []; for (let k = 0; k < a.length; k += 2) o.push(LL(a[k], a[k + 1])); return o; };
-  function setBase(m, id) { if (m._b) m.removeLayer(m._b); m._b = null; const b = BASES[id] || BASES.sat; m.getContainer().dataset.base = id; if (b[1]) { m._b = L.tileLayer(b[1], { maxZoom: 18, maxNativeZoom: b[2], attribution: b[3] }).addTo(m); m._b.bringToBack(); } }
+  function setBase(m, id) { if (m._b) m.removeLayer(m._b); m._b = null; const b = BASES[id] || BASES.sat; m.getContainer().dataset.base = id; if (b[1]) { m._b = L.tileLayer(b[1], { maxZoom: 18, maxNativeZoom: b[2], attribution: b[3], opacity: id === 'plan' ? .75 : 1 }).addTo(m); m._b.bringToBack(); } }
   const BOUNDS = L.latLngBounds(SITE.wtg.map((w, i) => P(i))).pad(.07);
   function mkMap(el, base) { const m = L.map(el, { zoomControl: false, zoomSnap: .25, zoomDelta: .5, wheelPxPerZoomLevel: 90, maxZoom: 18, minZoom: 9, maxBounds: BOUNDS.pad(1.2) }); m.attributionControl.setPrefix(''); setBase(m, base); m.fitBounds(BOUNDS); return m; }
   const mppOf = m => 156543.03392 * Math.cos(MT.lat0 * Math.PI / 180) / Math.pow(2, m.getZoom());
-  S.base = load('jambyl-base', 'sat'); if (!BASES[S.base]) S.base = 'sat'; S.mview = 'map'; S.grp = false;
+  S.base = load('jambyl-base', 'sat'); if (!BASES[S.base]) S.base = 'sat'; S.mview = 'map'; S.grp = false; S.aer = { on: false, k: null, auto: true, cmp: false, sx: .5 };
   const map = mkMap('map', S.base), rot = i => (i * 47) % 120, num = i => name(i).replace(/\D/g, '').replace(/^0+/, '');
   const roadsLL = [...SITE.roads, ...SITE.access].map(lineLL), trenchLL = Object.values(SITE.trench).flat().map(lineLL);
   const gCivil = L.layerGroup([L.polyline(roadsLL, { color: '#3b3324', weight: 5, opacity: .75, interactive: false }), L.polyline(roadsLL, { color: '#ecd9a6', weight: 2.6, interactive: false })]).addTo(map);
   const gCable = L.polyline(trenchLL, { color: '#4fd1c5', weight: 1.4, dashArray: '5 5', interactive: false }).addTo(map);
   const gSS = L.layerGroup().addTo(map), gW = L.layerGroup().addTo(map), gG = L.layerGroup().addTo(map);
+  const paneA = map.createPane('aerA'), paneB = map.createPane('aerB'), gA = L.layerGroup().addTo(map), gB = L.layerGroup().addTo(map); paneA.style.zIndex = 350; paneB.style.zIndex = 351; paneA.style.pointerEvents = paneB.style.pointerEvents = 'none';
   const fitAll = () => { map.invalidateSize(); map.fitBounds(BOUNDS, { animate: false }); }, fitAspect = () => map.invalidateSize();
   let raf = 0; const redraw = () => { if (!raf) raf = requestAnimationFrame(() => { raf = 0; drawMap(); }); };
   // значок ВЭУ: издалека — кружок класса, вблизи — чертёж площадки в масштабе карты
@@ -78,9 +79,10 @@
       lab(SITE.ss[0], z < 11.6 ? 'ПС' : 'ПС 220/35 кВ · ' + fmt(C.L.ss * 100) + ' %', ''); if (z >= 12.4) lab(SITE.ss[0] + 378, 'СНЭ · ' + fmt(C.L.bess * 100) + ' %', 'bess'); }
     if (groups) { for (let f = 0; f < W.NF; f++) { const m = W.feeders[f]; if (!m.length) continue; let p = 0, late = 0, cx = 0, cz = 0; for (const i of m) { p += C.det[i].pct; late += C.st[i].late > 0; cx += X(i); cz += Z(i); } p /= m.length;
         L.marker(LL(cx / m.length, cz / m.length), { icon: L.divIcon({ className: 'fgrp' + (late ? ' late' : ''), html: `<i style="--p:${Math.round(p * 100)}"></i><b>Ф${f + 1}</b><span>${Math.round(p * 100)} % · ${m.length} ВЭУ</span>`, iconSize: [0, 0] }) }).on('click', () => map.fitBounds(L.latLngBounds(m.map(P)).pad(.5))).bindTooltip(`Фидер ${f + 1}: ${m.map(num).join(', ')}${late ? '<br>отстают от плана: ' + late : ''}`, { direction: 'top', className: 'wtip' }).addTo(gG); } }
-    else for (let i = 0; i < N; i++) { const on = S.sel === i; if (S.off.has(clsOf(i)) && !on) continue; const g = glyph(i, u, on), dim = !pass(i) && !on;
+    else for (let i = 0; i < N; i++) { const on = S.sel === i; if (S.off.has(clsOf(i)) && !on) continue; const g = S.aer.on && u <= 5 && UI.fl ? aerTag(i, on) : glyph(i, u, on), dim = !pass(i) && !on;
       const mk = L.marker(P(i), { icon: L.divIcon({ className: 'wm' + (dim ? ' dim' : '') + (on ? ' on' : ''), html: g.html, iconSize: [g.s, g.s], iconAnchor: [g.s / 2, g.s / 2] }), zIndexOffset: on ? 1000 : 0, keyboard: false }).on('click', e => { L.DomEvent.stopPropagation(e); select(i, false); }).addTo(gW);
       mk.bindTooltip(tipOf(i), { direction: 'top', offset: [0, -g.s / 2 + 4], className: 'wtip' + (on ? ' sel' : ''), permanent: on && u > 3.3 }); }
+    drawAer(u);
     const n = shown(); $('#mapnote').textContent = groups ? 'Группы по фидерам: приблизьте карту, чтобы увидеть ВЭУ' : n < N ? `Показано ${n} из ${N} ВЭУ` : ''; $('#mapnote').hidden = !groups && n >= N; }
   // матрица: все ВЭУ плитками по фидерам — вся площадка на одном экране, без карты
   function drawGrid() { let h = ''; for (let f = 0; f < W.NF; f++) { const m = W.feeders[f].slice().sort((a, b) => W.fpos[b] - W.fpos[a]); if (!m.length) continue; let p = 0; for (const i of m) p += C.det[i].pct;
@@ -89,6 +91,25 @@
     $('#grid').innerHTML = `<p class="hint">Фидеры 35 кВ, в каждом ВЭУ идут от подстанции к дальней. Цвет — «${SETS[S.color].name.toLowerCase()}», полоска внизу — готовность.</p>` + h; const n = shown(); $('#mapnote').textContent = n < N ? `Показано ${n} из ${N} ВЭУ` : ''; $('#mapnote').hidden = n >= N; }
   $('#grid').addEventListener('click', e => { const b = e.target.closest('.wt'); if (b) select(+b.dataset.i, false); });
   function focus(i) { if (S.mview !== 'map') return; map.invalidateSize(); map.setView(P(i), Math.max(map.getZoom(), 15.5), { animate: false }); }
+  /* аэросъёмка на карте: снимки облёта лежат на своих местах в масштабе карты; издалека — контуры кадров в цвете стадии.
+     «Было — стало» делит карту шторкой: слева предыдущий облёт, справа выбранный. Сами снимки рисует epc-drone.js. */
+  const aerBox = i => [LL(X(i) - 230, Z(i) + 108), LL(X(i) + 90, Z(i) - 112)];
+  function aerTag(i, on) { const o = UI.fl.look(i, S.aer.k || UI.fl.lastK(S.D) || 1); return { s: 0, html: `<span class="atag${o.diff > 0 ? ' bad' : o.diff < 0 ? ' warn' : ''}${on ? ' on' : ''}" style="--dy:${Math.round(112 / mppOf(map)) + 5}px"><b>${name(i)}</b> ${esc(UI.fl.STG[o.ai][1].toLowerCase())}${o.diff ? ' · расхождение с отчётом' : ''}</span>` }; }
+  function aerClip() { const A = S.aer; if (!A.on || !A.cmp) { paneA.style.clip = paneB.style.clip = 'auto'; return; } const nw = map.containerPointToLayerPoint([0, 0]), se = map.containerPointToLayerPoint(map.getSize()), x = nw.x + (se.x - nw.x) * A.sx;
+    paneA.style.clip = `rect(${nw.y}px,${x}px,${se.y}px,${nw.x}px)`; paneB.style.clip = `rect(${nw.y}px,${se.x}px,${se.y}px,${x}px)`; $('#aerline').style.left = A.sx * 100 + '%'; }
+  function drawAer(u) { gA.clearLayers(); gB.clearLayers(); const A = S.aer, bar = $('#aerbar'), F = UI.fl; bar.hidden = !A.on; $('#aerline').hidden = !(A.on && A.cmp); $('#m-aer').classList.toggle('on', A.on); if (!A.on || !F) return aerClip();
+    const K = F.lastK(S.D); if (!K) { bar.innerHTML = `<span>На ${fd(S.D)} облётов ещё не было</span>`; return aerClip(); } if (A.k == null || A.k > K || A.auto) A.k = K; const k = A.k, pk = Math.max(1, k - 1), vb = map.getBounds().pad(.2), det = u < 5.2; let diff = 0;
+    for (let i = 0; i < N; i++) { const o = F.look(i, k); if (o.diff) diff++; if (!vb.contains(P(i))) continue;
+      const put = (g, pane, kk, boxes) => (det ? L.svgOverlay(F.el(i, F.dayOf(kk), boxes), aerBox(i), { pane, interactive: false }) : L.rectangle(aerBox(i), { pane, color: '#fff', weight: 1, fillColor: F.STG[F.look(i, kk).ai][0], fillOpacity: .9, interactive: false })).addTo(g);
+      put(gB, 'aerB', k, true); if (A.cmp) put(gA, 'aerA', pk, false); }
+    bar.innerHTML = `<button data-ak="prev" aria-label="Предыдущий облёт"${k <= 1 ? ' disabled' : ''}>‹</button><span><b>Облёт № ${k}</b> · ${fd(F.dayOf(k))}</span><button data-ak="next" aria-label="Следующий облёт"${k >= K ? ' disabled' : ''}>›</button>
+      <button data-ak="cmp" class="${A.cmp ? 'on' : ''}">Было — стало</button>${A.cmp ? `<input type="range" id="aer-sx" min="5" max="95" value="${Math.round(A.sx * 100)}" aria-label="Положение шторки"><span class="lr">слева № ${pk} · ${fd(F.dayOf(pk))}</span>` : `<span class="lr">${det ? 'расхождений с отчётом: ' + diff : 'приблизьте карту — откроются снимки'}</span>`}<button data-ak="list">Сверка</button>`;
+    aerClip(); }
+  $('#aerbar').addEventListener('click', e => { const b = e.target.closest('[data-ak]'); if (!b) return; const A = S.aer, k = b.dataset.ak, K = UI.fl.lastK(S.D);
+    if (k === 'prev') { A.k = Math.max(1, A.k - 1); A.auto = false; } else if (k === 'next') { A.k = Math.min(K, A.k + 1); A.auto = A.k === K; } else if (k === 'cmp') A.cmp = !A.cmp; else if (k === 'list') return go('drone'); redraw(); });
+  $('#aerbar').addEventListener('input', e => { if (e.target.id === 'aer-sx') { S.aer.sx = +e.target.value / 100; aerClip(); } });
+  $('#m-aer').onclick = () => { S.aer.on = !S.aer.on; if (S.aer.on && S.mview !== 'map') { S.mview = 'map'; mapHead(); $('#mapbox').dataset.view = 'map'; map.invalidateSize(); } redraw(); };
+  map.on('move', aerClip); map.on('moveend', () => { if (S.aer.on) redraw(); });
   map.on('zoomend', redraw); map.on('click', () => { if (S.sel != null) select(null, false); });
   function mapHead() { $('#m-base').innerHTML = Object.entries(BASES).map(([k, b]) => `<button data-base="${k}" class="${S.base === k && S.mview === 'map' ? 'on' : ''}">${b[0]}</button>`).join('') + `<button data-mv="grid" class="${S.mview === 'grid' ? 'on' : ''}">Матрица</button>`; $('#m-grp').classList.toggle('on', S.grp); $('#m-grp').hidden = S.mview !== 'map'; $('.zoom').hidden = S.mview !== 'map'; }
   $('#m-base').addEventListener('click', e => { const b = e.target.closest('button'); if (!b) return; if (b.dataset.mv) S.mview = 'grid'; else { S.mview = 'map'; S.base = b.dataset.base; save('jambyl-base', S.base); setBase(map, S.base); } mapHead(); $('#mapbox').dataset.view = S.mview; if (S.mview === 'map') map.invalidateSize(); redraw(); });
@@ -186,7 +207,7 @@
   $('#d-range').max = E.MAXD; $('#d-range').addEventListener('input', e => { S.D = +e.target.value; update(); });
   $('#d-prev').onclick = () => { S.D = clampD(S.D - 7); update(); }; $('#d-next').onclick = () => { S.D = clampD(S.D + 7); update(); }; $('#d-today').onclick = () => { S.D = E.real ? clampD(E.real.day) : today; update(); };
   addEventListener('keydown', e => { if (e.key === 'Escape' && S.view === 'map') select(null, false); });
-  const UI = window.EPCUI = { S, C, E, W, SITE, N, $, fmt, fd, fm, name, esc, SETS, READY, HOLD, T_STATUS, holdRows, craneBox, select, update, go, toast, addPunch, movePunch, renderLeft, redraw, punches: () => PUNCH, L, LL, P, mkMap, setBase, BASES, BOUNDS, lineLL, mppOf, num, load, save, views: {}, today };
+  const UI = window.EPCUI = { S, C, E, W, SITE, N, $, fmt, fd, fm, name, esc, SETS, READY, HOLD, T_STATUS, holdRows, craneBox, select, update, go, toast, addPunch, movePunch, renderLeft, redraw, punches: () => PUNCH, L, LL, P, mkMap, setBase, map, mapHead, BASES, BOUNDS, lineLL, mppOf, num, load, save, views: {}, today };
   const q = new URLSearchParams(location.hash.slice(1)); if (q.get('d')) S.D = clampD(+q.get('d'));
   UI.start = () => { calc(); update(); go(q.get('v') && (q.get('v') === 'map' || UI.views[q.get('v')]) ? q.get('v') : q.get('wtg') ? 'map' : 'dash'); if (q.get('wtg')) { const i = SITE.wtg.findIndex(w => w[0] === q.get('wtg')); if (i >= 0) select(i, true); } };
 })();
