@@ -220,7 +220,7 @@
   function buildPos(i) { const d = C.det[i], k = d.next ? d.steps.indexOf(d.next) : 10; if (k >= 10) return 10; const prev = k > 0 && d.steps[k - 1].id === d.next.id ? d.steps[k - 1].day : E.fact[d.next.id].s[i]; return k + Math.max(0, Math.min(.98, (S.D - prev) / Math.max(.5, d.next.day - prev))); }
   function open3d(i) { const d = C.det[i], q = new URLSearchParams({ build: 1, wtg: name(i), b: buildPos(i).toFixed(2), d: fd(S.D), f: d.steps.map(x => dshort(x.day)).join(','), pl: d.steps.map(x => dshort(x.plan)).join(',') });
     let box = $('#b3d'); if (!box) { box = document.createElement('div'); box.id = 'b3d'; box.innerHTML = '<iframe title="Стройка ВЭУ в 3D"></iframe><button class="btn" data-b3x>← К карте</button>'; $('#main').appendChild(box); }
-    box.querySelector('iframe').src = 'wtg.html?v=13#' + q.toString(); box.hidden = false; }
+    box.querySelector('iframe').src = 'build3d.html?v=6#' + q.toString(); box.hidden = false; }
   document.addEventListener('click', e => { const b = e.target.closest('[data-b3d]'); if (b) return open3d(+b.dataset.b3d); if (e.target.closest('[data-b3x]')) { const box = $('#b3d'); box.hidden = true; box.querySelector('iframe').src = 'about:blank'; } });
   addEventListener('keydown', e => { const box = $('#b3d'); if (e.key === 'Escape' && box && !box.hidden) { box.hidden = true; box.querySelector('iframe').src = 'about:blank'; } });
 

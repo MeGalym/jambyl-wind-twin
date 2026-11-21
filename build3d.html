@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Construct — стройка ВЭУ в 3D</title>
+<link rel="icon" href="data:,">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Geologica:wght@400;500;600&family=Golos+Text:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+/* дневная сцена на весь экран, поверх — тёмные стеклянные панели, как в остальном Construct */
+:root{--glass:rgba(22,28,42,.72);--line:rgba(255,255,255,.12);--text:#f2f4f8;--muted:#aab3c4;--faint:#7d8799;--amber:#f5b544;--ok:#62d6a0;--display:"Geologica","Golos Text",system-ui,sans-serif;--body:"Golos Text",system-ui,-apple-system,"Segoe UI",sans-serif}
+*{box-sizing:border-box}html,body{height:100%;margin:0;overflow:hidden;background:#dfe7ef;color:var(--text);font:13px/1.45 var(--body);-webkit-font-smoothing:antialiased}
+#gl{position:fixed;inset:0;width:100%;height:100%;display:block;touch-action:none}
+button,input{font:inherit;color:inherit}button{border:0;background:none;padding:0;cursor:pointer;text-align:inherit}:focus-visible{outline:2px solid var(--amber);outline-offset:2px}[hidden]{display:none!important}
+#hud{position:fixed;inset:0;pointer-events:none;display:grid;gap:10px;padding:14px;grid-template-columns:300px minmax(0,1fr) 290px;grid-template-rows:minmax(0,1fr) auto;grid-template-areas:"main . list" "bar bar bar"}
+.pn{pointer-events:auto;background:var(--glass);-webkit-backdrop-filter:blur(22px) saturate(150%);backdrop-filter:blur(22px) saturate(150%);border:1px solid var(--line);border-radius:18px;padding:14px 16px;box-shadow:0 14px 36px rgba(0,0,0,.22);min-width:0}
+#p-main{grid-area:main;align-self:start}#p-list{grid-area:list;align-self:start;max-height:100%;overflow:auto;scrollbar-width:none}
+#p-bar{grid-area:bar;justify-self:center;width:min(1040px,100%);display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:9px 12px;border-radius:999px}
+.ttl b{display:block;font:600 16px/1.2 var(--display)}.ttl span{color:var(--muted);font-size:11.5px}
+.step{margin-top:12px}.step em{display:block;font-style:normal;color:var(--amber);font-size:11.5px;font-weight:600;font-variant-numeric:tabular-nums}
+.step b{display:block;font:500 21px/1.2 var(--display);letter-spacing:-.01em;margin:3px 0 8px}
+.op{display:flex;gap:9px;align-items:flex-start;background:rgba(245,181,68,.14);border:1px solid rgba(245,181,68,.4);border-radius:12px;padding:8px 10px;font-size:12.5px;line-height:1.4;min-height:52px}
+.op i{flex:none;width:8px;height:8px;border-radius:50%;background:var(--amber);margin-top:5px;animation:pl 1.3s infinite}@keyframes pl{50%{opacity:.25}}
+.kv{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:5px 10px;margin:12px 0 0;font-size:12px}.kv dt{color:var(--muted)}.kv dd{margin:0;font-family:var(--display);font-variant-numeric:tabular-nums}
+.st{margin:8px 0 0;color:var(--amber);font-size:12px}.src{margin:10px 0 0;color:var(--faint);font-size:10.5px;line-height:1.4}
+h3{margin:0 0 8px;font:500 13.5px var(--display)}
+.row{display:grid;grid-template-columns:10px minmax(0,1fr) auto;gap:8px;align-items:center;width:100%;padding:6px 8px;border-radius:9px;font-size:12px;color:var(--muted)}
+.row:hover{background:rgba(255,255,255,.07)}.row.sel{background:rgba(245,181,68,.18);color:#fff}.row i{width:8px;height:8px;border-radius:50%;background:rgba(255,255,255,.22)}
+.row.done i{background:var(--ok)}.row.cur i{background:var(--amber);box-shadow:0 0 0 3px rgba(245,181,68,.25)}.row.done span{color:var(--text)}.row em{font-style:normal;font-size:11px;color:var(--faint);font-variant-numeric:tabular-nums;white-space:nowrap}
+.bb{padding:8px 14px;border-radius:999px;background:rgba(255,255,255,.1);font-size:12px;font-weight:500;white-space:nowrap}.bb:hover{background:rgba(255,255,255,.2)}.bb.on{background:var(--amber);color:#1b1407}
+.bb.main{background:var(--amber);color:#1b1407;font-weight:600;min-width:158px;text-align:center}
+.sl{position:relative;flex:1 1 200px;display:flex;align-items:center;min-width:120px}.sl input{width:100%;margin:0;accent-color:var(--amber)}
+.sl i{position:absolute;top:50%;width:2px;height:20px;margin:-10px 0 0 -1px;background:#fff;border-radius:1px;pointer-events:none}
+#tags{position:fixed;inset:0;pointer-events:none;overflow:hidden}
+.tag{position:absolute;left:0;top:0;display:flex;align-items:center;gap:0;will-change:transform}
+.tag i{width:9px;height:9px;border-radius:50%;background:var(--amber);box-shadow:0 0 0 3px rgba(22,28,42,.55);margin:-4.5px 0 0 -4.5px;flex:none}
+.tag span{margin:-34px 0 0 14px;background:rgba(22,28,42,.86);border:1px solid var(--line);border-radius:999px;padding:4px 11px;font-size:11.5px;font-weight:500;white-space:nowrap;position:relative}
+.tag span::before{content:"";position:absolute;left:-13px;bottom:-9px;width:16px;height:1.5px;background:rgba(22,28,42,.8);transform:rotate(-58deg);transform-origin:right center}
+@media (max-width:1100px){#hud{grid-template-columns:270px minmax(0,1fr);grid-template-areas:"main ." "bar bar"}#p-list{display:none}}
+@media (max-width:760px){#hud{grid-template-columns:minmax(0,1fr);grid-template-areas:"main" "bar";padding:10px}.step b{font-size:17px}.src,.kv{display:none}#p-bar{border-radius:18px}.bb{padding:7px 10px}.bb.main{min-width:0}.tag span{font-size:10.5px}}
+</style>
+</head>
+<body>
+<canvas id="gl" aria-label="Стройка ветроустановки в 3D"></canvas>
+<div id="tags"></div>
+<div id="hud">
+  <section class="pn" id="p-main"><div class="ttl"><b id="b-title"></b><span id="b-sub"></span></div>
+    <div class="step"><em id="b-n"></em><b id="b-t"></b><div class="op"><i></i><span id="b-op"></span></div></div>
+    <dl class="kv" id="b-kv"></dl><p class="st" id="b-st"></p>
+    <p class="src">Фундамент и марки бетона — по чертежу 104218-CI-DW-040, заземление — по 104218-EL-DW-040. Раскладка арматуры типовая: в чертеже указана только масса.</p></section>
+  <section class="pn" id="p-list"><h3>Шаги стройки</h3><div id="b-rows"></div></section>
+  <section class="pn" id="p-bar"><button class="bb" data-b="start">С начала</button><button class="bb main" data-b="play" id="b-play">▶ Показать стройку</button>
+    <label class="sl"><input id="b-range" type="range" min="0" max="10" step="0.005" aria-label="Ход стройки"><i id="b-now" title="Состояние на дату"></i></label>
+    <button class="bb" data-b="now">На дату</button><button class="bb" data-b="sec" title="Разрезать фундамент пополам">Разрез</button><button class="bb" data-b="speed" title="Скорость показа">× 1</button><button class="bb" data-b="units">Узлы турбины</button></section>
+</div>
+<script type="importmap">
+{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js","three/addons/":"https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"}}
+</script>
+<script type="module" src="build3d.js?v=6"></script>
+</body>
+</html>
