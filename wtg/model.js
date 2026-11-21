@@ -2,10 +2,11 @@
 // Источники: чертёж фундамента 104218-CI-DW-040 (нагрузки по SANY SI-19580, ось 110 м; размеры фундамента и анкерной корзины),
 // раскладка L14 и RFP (140 ВЭУ на 1000 МВт), Global Wind Atlas (ветер). Значения со звёздочкой приняты: паспорта ВЭУ в папках нет.
 
+// передаточное число 131 — под генератор двойного питания: 1000 об/мин синхронных, на номинале около 1170
 export const NOM = {
   model: 'SANY SI-19580', rotorD: 195, hubH: 110, ratedKw: 7150, platformKw: 8000,
   cutIn: 3, cutOut: 25, storm: 22, rpmMin: 4.6, rpmMax: 8.9, tsr: 9.4, cp: 0.46, eff: 0.935,
-  gearRatio: 131,      // под генератор двойного питания: 1000 об/мин синхронных, на номинале около 1170 towerBaseD: 4.56, towerTopD: 3.3, towerSections: 5, bladeL: 95.4,
+  gearRatio: 131, towerBaseD: 4.56, towerTopD: 3.3, towerSections: 5, bladeL: 95.4,
   fnd: { slabD: 26, pedestalD: 6.6, ringOuterD: 4.782, ringInnerD: 4.346, bolts: 200, concrete: 680.5, steelT: 81.8, depth: 3.7 },
   rho: 1.08, vMean: 9.05,
 };

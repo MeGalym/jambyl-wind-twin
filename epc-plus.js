@@ -128,7 +128,7 @@
 
   /* ---------- приёмка ВЭУ: пять этапов с чек-листами, от фундамента до передачи заказчику ----------
      Пункт закрывается по ходу работ на дату; галочку можно поставить или снять вручную (хранится в браузере).
-     Этап не считается принятым, пока по ВЭУ открыто критичное замечание. */
+     Этапы принимаются по порядку: следующий не закрыт, пока открыт предыдущий или по ВЭУ есть критичное замечание. */
   const CK = [
     ['fnd', 'Фундамент принят', ['Акт скрытых работ: армирование', 'Протокол прочности бетона, 28 суток', 'Геодезия анкерной корзины', 'Контур заземления измерен', 'Обратная засыпка и планировка'], i => [E.fact.found.e[i], E.fact.found.e[i] + E.CURE]],
     ['mec', 'Механическая готовность', ['Затяжка фланцев башни, протокол моментов', 'Болты лопастей и ступицы затянуты', 'Лестница, лифт и страховочная система', 'Кабели в башне уложены и закреплены', 'Молниезащита: цепь от лопасти до земли', 'Гидравлика и смазка заправлены', 'Осмотр лопастей после подъёма'], i => [E.fact.erect.s[i], E.fact.erect.e[i] + 4]],
@@ -139,7 +139,7 @@
   let CH = UI.load('jambyl-chk', {}); const HS = { sel: null, only: '' };
   function chkOf(i, D) { const man = CH[i] || {}, crit = (C.open.get(i) || []).filter(t => t.sev === 'bad'); let all = 0, prevDone = true;
     const st = CK.map(([id, title, items, span]) => { const [a, b] = span(i), n = items.length; const its = items.map((t, j) => { const day = a + (j + 1) / n * (b - a), auto = D >= day, m = man[id + j]; return { t, day, done: m != null ? !!m : auto, manual: m != null }; });
-      const k = its.filter(x => x.done).length; all += k; const full = k === n, status = full && prevDone ? (crit.length ? 'hold' : 'done') : k || (D >= a && prevDone) ? 'run' : 'wait'; prevDone = prevDone && full;      // этапы принимаются по порядку: следующий не закрыт, пока открыт предыдущий return { id, title, its, k, n, status, a, b }; });
+      const k = its.filter(x => x.done).length; all += k; const full = k === n, status = full && prevDone ? (crit.length ? 'hold' : 'done') : k || (D >= a && prevDone) ? 'run' : 'wait'; prevDone = prevDone && full; return { id, title, its, k, n, status, a, b }; });
     const cur = st.find(s => s.status !== 'done') || null, lvl = st.filter(s => s.status === 'done').length; return { i, st, all, cur, lvl, crit }; }
   const CKC = { done: '#62d6a0', run: '#f5b544', hold: '#ff6452', wait: 'rgba(255,255,255,.16)' }, CKT = { done: 'принят', run: 'в работе', hold: 'держит замечание', wait: 'не начат' };
   function chk() { const D = S.D, all = Array.from({ length: N }, (_, i) => chkOf(i, D)), cnt = CK.map((_, k) => all.filter(o => o.st[k].status === 'done').length), items = all.reduce((s, o) => s + o.all, 0), hold = all.filter(o => o.st.some(s => s.status === 'hold'));
