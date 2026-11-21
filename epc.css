@@ -488,3 +488,19 @@ details.more>summary{cursor:pointer;color:var(--muted);font-size:12.5px;padding:
 .swipe .sl::after{content:"‹ ›";position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);background:#fff;color:#161c2a;border-radius:999px;padding:3px 8px;font:600 12px var(--font);white-space:nowrap}
 .swipe input{position:absolute;inset:0;width:100%;height:100%;opacity:0;cursor:ew-resize;margin:0}
 .aerph{image-rendering:auto}
+
+/* аэросъёмка: выбор двух дат и подписи сторон шторки */
+#aerbar{flex-wrap:wrap;justify-content:center;border-radius:20px;white-space:normal;overflow:visible;width:max-content;max-width:calc(100% - 24px)}
+#aerbar label{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted);padding-left:6px}#aerbar select{height:30px;border:0;background:var(--tile2);font-size:12px;max-width:170px}
+.aerchip{position:absolute;bottom:96px;left:12px;z-index:480;background:rgba(20,26,39,.9);border:1px solid var(--line);border-radius:999px;padding:5px 12px;font:600 12px var(--font);color:#fff;pointer-events:none}
+.aerchip.r{left:auto;right:12px;background:var(--amber);color:#1b1407;border-color:transparent}
+
+/* панель аэросъёмки — отдельной строкой под картой, карту не закрывает */
+#aerbar{position:static;transform:none;flex:none;width:auto;max-width:none;border-radius:0;border:0;border-top:1px solid var(--line);box-shadow:none;justify-content:flex-start;padding:8px 10px;gap:8px}
+#aerbar .lr{margin-left:auto}#aerbar input{width:120px}
+.aerchip{bottom:auto;top:108px}
+#mapbox:has(#aerbar:not([hidden])) #mapnote{display:none}
+@media (max-width:860px){.aerchip{top:150px}}
+#mapwrap{position:relative;flex:1 1 auto;min-height:0;display:flex}#mapwrap #map{flex:1 1 auto}
+#mapbox[data-view="grid"] #mapwrap{display:none}
+.aerchip{top:auto!important;bottom:26px}

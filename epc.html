@@ -9,7 +9,7 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Geologica:wght@300;400;500;600&family=Golos+Text:wght@400;500;600;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.css">
-<link rel="stylesheet" href="epc.css?v=16">
+<link rel="stylesheet" href="epc.css?v=19">
 </head>
 <body>
 <div id="app">
@@ -54,8 +54,8 @@
       <div class="maphead"><label>Раскраска<select id="m-color"><option value="stage">Стадия работ</option><option value="ready">Что держит</option><option value="late">Отставание</option></select></label>
         <div class="seg" id="m-base" role="group" aria-label="Вид карты"></div><button class="segbtn" id="m-grp" title="Собрать ВЭУ в группы по фидерам">Группы</button><button class="segbtn" id="m-aer" title="Положить на карту снимки облёта">Аэросъёмка</button>
         <div class="zoom"><button id="z-out" aria-label="Отдалить">−</button><button id="z-in" aria-label="Приблизить">+</button><button id="z-fit">Вся</button></div></div>
-      <div id="map" role="img" aria-label="Карта площадки"></div><div id="grid" aria-label="Матрица ВЭУ по фидерам"></div>
-      <div id="aerline" hidden></div><div id="aerbar" hidden></div><div id="mapnote"></div>
+      <div id="mapwrap"><div id="map" role="img" aria-label="Карта площадки"></div><div id="aerline" hidden></div><span class="aerchip" id="aerL" hidden></span><span class="aerchip r" id="aerR" hidden></span></div><div id="grid" aria-label="Матрица ВЭУ по фидерам"></div>
+      <div id="mapnote"></div><div id="aerbar" hidden></div>
     </div>
     <aside id="right" aria-label="Состояние"></aside>
   </section>
@@ -87,7 +87,7 @@
 <script src="epcw.js?v=24"></script>
 <script src="fact.js?v=2"></script>
 <script src="p6.js?v=2"></script>
-<script src="epc.js?v=19"></script>
+<script src="epc.js?v=21"></script>
 <script src="epc-views.js?v=8"></script>
 <script src="epc-drone.js?v=4"></script>
 <script src="epc-dor.js?v=1"></script>
